@@ -6,3 +6,4 @@ network based repl tool for:
 
 uses md5 hash to determine if copy is needed
 
+uses a modified webrepl from micropython (See LICENSE)
