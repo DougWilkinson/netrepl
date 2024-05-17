@@ -381,7 +381,7 @@ parser.add_argument("-d", action="store_true", help="cleanup/delete .py versions
 parser.add_argument("-n", action="store_true", help="don't actually do anything, dry run")
 parser.add_argument("-r", action="store_true", help="reboot node, do actions (if any) first")
 parser.add_argument("nodename")
-parser.add_argument("cmd", nargs="?", default="", choices=["ls", "put", "backup", ""],)
+parser.add_argument("cmd", nargs="?", default="", choices=["ls", "put", "backup", "init", ""],)
 parser.add_argument("args", nargs="*", default=[""], metavar="[dir | file1, file2]")
 
 #print(argv)
