@@ -11,7 +11,16 @@ from time import time, sleep, strftime
 import subprocess
 import argparse
 import getpass
-# import hashfile
+
+# imports related to genhash
+import hashlib
+import binascii
+
+
+MPY_EXLCUDES = ("boot.py", 
+				"natives.py",
+				"main.py",
+				"mysecrets.py")
 
 ##################
 # START WEBREPL
@@ -352,10 +361,10 @@ Sec-WebSocket-Key: foo\r
 #################
 # END WEBREPL
 #################
+
+# Local genhash function
+# TODO: use string to define a function?
 		
-genhash_func = """
-import hashlib
-import binascii
 def genhash(file):
 	file_hash = hashlib.sha256()
 	try:
@@ -366,22 +375,38 @@ def genhash(file):
 				buf = handle.read(100)	
 		return binascii.hexlify(file_hash.digest())
 	except:
-		return b'undefined_hash'
+		return b'FileNotFound'
+
+
+genhash_func = """
+import uhashlib
+import ubinascii
+def genhash(file):
+	file_hash = uhashlib.sha256()
+	with open(file, "rb") as handle:
+		buf = handle.read(100)
+		while buf:
+			file_hash.update(buf)
+			buf = handle.read(100)	
+	print(ubinascii.hexlify(file_hash.digest() ) )
 """
 
-exec(genhash_func)
+# exec(genhash_func)
 
 parser = argparse.ArgumentParser(prog="mpyrepl")
-parser.add_argument("-v", action="store_true", help="verbose/debug")
-parser.add_argument("-c", action="store_true", help="connect/show console output (other actions ignored)")
+parser.add_argument("-b", action="store_true", help="send extra breaks")
+parser.add_argument("-v", action="store_true", help="verbose")
+parser.add_argument("-vv", action="store_true", help="debug")
+parser.add_argument("-c", action="store_true", help="tail console")
 parser.add_argument("-e", metavar="module.py", help="execute module in repl, showing ouput")
+parser.add_argument("-strict", action="store_true", help="strict checking")
 parser.add_argument("-m", action="store_true", help="copy .mpy version of module if possible")
 parser.add_argument("-f", action="store_true", help="force copy even if older")
 parser.add_argument("-d", action="store_true", help="cleanup/delete .py versions when copying .mpy to remote")
 parser.add_argument("-n", action="store_true", help="don't actually do anything, dry run")
 parser.add_argument("-r", action="store_true", help="reboot node, do actions (if any) first")
 parser.add_argument("nodename")
-parser.add_argument("cmd", nargs="?", default="", choices=["ls", "put", "backup", "init", ""],)
+parser.add_argument("cmd", nargs="?", default="", choices=["ls", "put", "sync", "backup", "init", ""],)
 parser.add_argument("args", nargs="*", default=[""], metavar="[dir | file1, file2]")
 
 #print(argv)
@@ -413,48 +438,70 @@ class File:
 		self.date_modified = 0.0
 		self.is_dir = is_dir
 
-# class Repl:
-# 	def __init__(self, host="", password=None, timeout=40) -> None:
-# 		self.host = host
-# 		self.password = mysecrets.password
-# 		self.timeout = timeout
-# 		self.connected = False
-# 		self.result = ""
-# 		self.have_prompt = False
-# 		self.stop = False
-# 		self.total_files = 0
-# 		self.total_bytes = 0
-# 		if host != "":
-# 			self.session = self.connect()
+
+# Recursive function takes a .py file and looks for imported
+# modules not native to micropython
+# returns a full list of all imported modules as a list of .py files
+# that can be used to update related files
+
+# A short list of internal micropython modules I use
+# TODO: Generate or use a complete list from ?? to check for these
+
+skip = ("#", "umqtt.simple", "bluetooth", "ubinascii",
+		"uhashlib", "random",
+		"struct", "dht", "uasyncio", "asyncio", 
+		"neopixel", "machine", "time", "network", 
+		"ntptime", "ubinascii", "gc", "json",
+		"webrepl")
+
+def find_imports(filename) -> list:
+	found = [filename]
+	try:
+		with open(filename) as file:
+			line = file.readline()
+			while line:
+				if "import" in line or "from" in line:
+					items = line.strip().split(" ")
+					if (items[1] not in skip and "#" not in items[0]):
+						if items[0] == "from" or items[0] == "import":
+							nextfile = items[1] + ".py"
+							#print("looking at: ", nextfile)
+							found += find_imports(nextfile)
+				line = file.readline()
+	except FileNotFoundError:
+		pass
+
+	return found
 
 def connect(host, password=None, timeout=70, debug=True, verbose=True) -> Webrepl:
 	if password is None:
 		password = os.environ.get("WRPWD")
 		if password is None:
 			password = getpass.getpass("Enter webrepl password: ")
-	first = True
 	session = Webrepl()
 	#print("after 1st Webrepl(), before session while loop")
-	while not session.connected:
+	for i in range(5):
 		try:
-			if not first:
-				sleep(10)
-			first = False
+			start_time = time()
 			print("Connecting to: {} (timeout={})".format(host, timeout))
 			session = Webrepl(**{'host':host, 
 					'password': password,
 					'timeout':timeout,
 					'debug': debug,
 					'verbose': verbose})
+			if session.connected:
+				return session
 		except KeyboardInterrupt:
 			print("in connect: Ctrl-C!")
 			exit()
 		except:
-			print("Unable to connect, sleeping for 10 secs")
+			print("Connect timed out, retry={} in 10 seconds".format(i) )
 
-	return session
+		while time() - start_time < 11:
+			sleep(1)
+	return None
 			
-def start_console(session) -> bool:
+def tail_console(session) -> bool:
 	user_exit = False
 	
 	while not user_exit:
@@ -467,10 +514,18 @@ def start_console(session) -> bool:
 			break
 	return user_exit
 
-@retry
-def send_break(session) -> bool:
-	session.sendcmd(chr(3))
-	sleep(1)
+def send_break(session, xtra_breaks=False) -> bool:
+	print("Sending break(s) ...")
+	if xtra_breaks:
+		for i in range(15):
+			session.sendcmd(chr(3))
+			sleep(1)
+	else:
+		session.sendcmd(chr(3))
+		sleep(1)
+	r = session.sendcmd('webrepl')
+	#print("result: ", r)
+	return b'module' in r
 
 	# def sendcommand(self, cmd, src=None, dst=None, retries=3) -> bool:
 	# 	self.result = ""
@@ -599,63 +654,12 @@ def show_remote_dir(session, path=""):
 		remote_stat(session, file)
 		print("{}  {}  {}".format(file.path, file.size, file.date_modified))
 
-# def copy_file(self, source_name, dest_name, put=True, dryrun=True) -> File:
-# 	# src/dst are strings
-# 	# Setup which functions to use for source/dest files
-# 	# depending on get/put
-# 	if put:
-# 		get_source_stat = self.local_stat
-# 		get_dest_stat = self.remote_stat
-# 		command = self.session.put_file
-# 	else:
-# 		get_source_stat = self.remote_stat
-# 		get_dest_stat = self.local_stat
-# 		command = self.session.get_file
-
-# 	source_file = File(source_name)
-# 	dest_file = File(dest_name)
-# 	missing_source = File("missing_source", exists=False)
-# 	error_copying = File("error_copying", exists=False)
-
-# 	if not get_source_stat(source_file):
-# 		return missing_source
-
-# 	# directory is handled by calling function
-# 	if source_file.is_dir:
-# 		return source_file
-
-# 	# If already exists and same size, just return		
-# 	# print(self.local_stat(local_file) )
-# 	if get_dest_stat(dest_file) and source_file.size == dest_file.size:
-# 		#print("{} skipping (same size)".format(source_file.path) )
-# 		return source_file
-	
-# 	if dryrun:
-# 		print("{} ({}) would replace {} ({})".format(source_file.path, source_file.size, dest_file.path, dest_file.size) )
-# 		return source_file
-	
-# 	# print("copy remote: ", remote_file.path, remote_file.size, "to local: ", local_file.path)
-
-# 	if self.sendcommand(command, source_file.path, dest_file.path ):
-# 		get_dest_stat(dest_file)
-# 		# print("local: ", remote_file.path, remote_file.size)
-# 		if source_file.size == dest_file.size:
-# 			print("copied {} ({} bytes)".format(dest_file.path, dest_file.size) )
-# 			self.total_bytes += dest_file.size
-# 			self.total_files += 1
-# 			return dest_file
-	
-# 	print("Error copying {}".format(dest_file.path))
-# 	return error_copying
-
 def put_file(session, source_name, dest_name="", dryrun=True, use_mpy=False, cleanup=False) -> File:
-	# src/dst are strings
-	# Setup which functions to use for source/dest files
-	# depending on get/put
-	#print("before: ", source_name, dest_name)
+	error_copying = File("error_copying", exists=False)
+	error_hashfile = File("error_hashfile", exists=False)
 
 	# Do not use .mpy for boot and main or if not a .py file
-	if source_name in ("boot.py","main.py") or ".py" not in source_name:
+	if source_name in MPY_EXLCUDES or ".py" not in source_name:
 		use_mpy = False
 
 	# Only use mpy if it's a .py file
@@ -684,50 +688,55 @@ def put_file(session, source_name, dest_name="", dryrun=True, use_mpy=False, cle
 	if source_file.is_dir:
 		return source_file
 
-	error_copying = File("error_copying", exists=False)
-	error_hashfile = File("error_hashfile", exists=False)
-
 	dest_file.hash = hash_remote(session, dest_file.path)
 	source_file.hash = hash_local(source_file.path)
 
-	# print("hashes: src=", source_file.hash, "dst=", dest_file.hash)
+	#print("hashes: src=", source_file.hash, "dst=", dest_file.hash)
 
-	# If already exists and hashes match, skip
-	# print(self.local_stat(local_file) )
+	# Do not overwrite existing secrets!
+	#print("desthash: ", dest_file.hash)
+	if 'mysecrets' in source_name and 'Error' not in dest_file.hash:
+		print("skip   : mysecrets already exists")
+		return dest_file
+	
+	# Skip if hash same or copy it
 	if source_file.hash == dest_file.hash:
-		print("{} - confirmed same".format(source_file.path) )
-		return source_file
-	
-	if dryrun:
-		print("{} ({}) would be replaced".format(source_file.path, source_file.size) )
-		py_file = File(source_name)
-		if use_mpy and remote_stat(session, py_file):
-			if py_file.exists:
-				print("{} - would be removed".format(source_name))
-		return source_file
-	
-	# print("copy remote: ", remote_file.path, remote_file.size, "to local: ", local_file.path)
+		print("skip   : {}".format(source_file.path) )
+	else:
+		# Either copy it or say we will
+		if dryrun:
+			print("replace: {} ({})".format(source_file.path, source_file.size) )
+		else:
+			session.put_file(source_file.path, dest_file.path )
+			new_hash = hash_remote(session, dest_file.path)
 
-	session.put_file(source_file.path, dest_file.path )
-	if remote_stat(session, dest_file):
-		# print("local: ", remote_file.path, remote_file.size)
-		if source_file.size == dest_file.size:
-			if use_mpy and cleanup:
-				try:
-					print("copied {} ({} bytes)".format(dest_file.path, dest_file.size), end=None )
-					result = session.sendcmd('uos.remove("{}")'.format(source_name))
-					if b'OSError' not in result:
-						print(" - and removed {}".format(source_name) )
-					else:
-						print("")
-				except:
-					print("put_file: cleanup: Error trying to delete {}".format(source_name) )
-			else:
-				print("copied {} ({} bytes)".format(dest_file.path, dest_file.size) )
-			return dest_file
-	
-	print("Error copying {}".format(dest_file.path))
-	return error_copying
+			if new_hash != source_file.hash:
+				# print("local: ", remote_file.path, remote_file.size)
+				# Stop here if copy fails
+				print("Error copying {}".format(dest_file.path))
+				return error_copying
+			
+			# Success!
+			print("copied : {} ({} bytes)".format(dest_file.path, dest_file.size) )
+
+	# Cleanup .py if .mpy was copied or exists
+	if use_mpy:
+		py_file = File(source_name)
+		if remote_stat(session, py_file):
+			if py_file.exists:
+				if dryrun:
+					print("remove : {}".format(source_name))
+				else:
+					try:
+						result = session.sendcmd('uos.remove("{}")'.format(source_name))
+						if b'Error' not in result:
+							print("removed: {}".format(source_name) )
+						else:
+							print("error  : {} not removed!".format(source_name) )
+					except:
+						print("Error  : {} not removed!".format(source_name) )
+
+	return dest_file
 
 def make_mpy(source):
 	filename = source.split("/")[-1:][0]
@@ -809,19 +818,19 @@ def backup(session, nodename, path="."):
 
 	print("backed up {} files ({} bytes)".format(total_files, total_bytes))
 
-def update(session, src_path="", file_list=[], dryrun=True):
-	print("updating node: {}".format(self.host) )
-	if len(file_list) > 0:
-		print("Updating files: {}".format(file_list))
-
-	self.sync(src_path, "", put=True, file_list=file_list, dryrun=dryrun)
-
-	print("updated {} files ({} bytes)".format(self.total_files, self.total_bytes))
-
 def reboot_node(session):
 	result = session.sendcmd('reboot()')
 	if b'REBOOTING' in result:
 		print("Reboot confirmed!")
+		return True
+	else:
+		print("Reboot failed!")
+		return False
+
+# hash_remote returns string with hash or:
+# "FileNotFound" = genhash remote function returned no file found
+# "HashError" = genhash was not created or had some other error
+# If remote genhash function not there, try to upload it
 
 def hash_remote(session, filename) -> str:
 	error_hashfile = File("error_hashfile", exists=False)
@@ -829,20 +838,24 @@ def hash_remote(session, filename) -> str:
 	
 	if hash and b'NameError' in hash:
 		# If NameError, hash function not loaded, load and try again
-		print("put_file: hashfile.genhash() not available on remote, attempting exec")
+		print("genhash() not found, sending ...")
 		exec_remote_list(session, genhash_func.split("\n"))
 
-		hash = session.sendcmd('genhash("{}")'.format(filename) )
-
+		newhash = session.sendcmd('genhash("{}")'.format(filename) )
+		#print("newhash: ", newhash)
 		# If failed again, return empty hash
-		if hash and b'NameError' in hash:
-			print("put_file: Failed to exec hashfile.py")
-			return ""
+		if newhash and b'NameError' in newhash:
+			print("genhash not found!")
+			return "UndefinedError"
+		hash = newhash
 
+	if hash and b'ENOENT' in hash:
+		return "FileNotFoundError"
+	
 	try:
 		return hash.decode('UTF-8').split("\'")[1]
 	except:
-		return ""
+		return "HashDecodeError"
 
 def hash_local(filename) -> str:
 	hash = genhash(filename)
@@ -882,6 +895,8 @@ def exec_remote_list(repl, exec_list):
 	for line in exec_list:
 		result = repl.pastecmd(line.rstrip())
 	repl.sendcmd(chr(4))
+	repl.read_cmd(100)
+	repl.read_cmd(100)
 
 def exec_remote_file(repl, exec_module):
 	with open(exec_module) as f:
@@ -901,65 +916,121 @@ def main():
 	args = parsed.args
 	dryrun = parsed.n
 	reboot = parsed.r
+	xtra_breaks = parsed.b
 	console = parsed.c
-	debug = parsed.v
+	verbose = parsed.v
+	debug = parsed.vv
+	strict = parsed.strict
 	exec_module = parsed.e
 	use_mpy = parsed.m
 	cleanup_py = parsed.d
-	#print(args)
 
 	# Exit with error if nothing to do
 	if parsed.cmd == "" and not (console or reboot or exec_module):
 		parser.error("No action specified for node")
 
-	if command == "backup" and not args[0]:
-		parser.error("backup directory not specified!")
+	while command or reboot:
 
-	if command == "sync" and len(args) != 2:
-		parser.error("At least one source and one destination required!")
+		# repl = FakeRepl(parsed.nodename)
+		# timeout low for sending commands/reply
+		repl = connect(nodename, timeout=20, debug=debug, verbose=verbose)
 
-	# repl = FakeRepl(parsed.nodename)
-	repl = connect(nodename,debug=debug)
+		if not repl:
+			print("Connect failed!")
+			break
 
-	if not console:
-		if send_break(repl):
+		if not send_break(repl, xtra_breaks):
+			print("Could not get REPL prompt ...")
+			break
 
-			# Exec module handling
-			if exec_module:
-				exec_remote_file(repl, exec_module)
+		print("Confirming hostname ...")
+		hostname = str(repl.sendcmd('hostname'))
 
-			if command == "ls":
-				if len(args) == 0:
-					args = [""]
-				for path in args:
-					show_remote_dir(repl, path)
+		if "NameError" in hostname:
+			hostname = "Undefined"
 
-			if command == "put":
-				if len(args) > 0:
-					#os.chdir(argv[3])
-					for src in args:
-						put_file(repl, src, dryrun=dryrun, use_mpy=use_mpy, cleanup=cleanup_py)
-				else:
-					parser.error("No files specified to put!")
+		if strict:
+			if nodename not in hostname:
+				print('Error: hostname "{}" != nodename "{}"'.format(hostname,nodename) )
+				break
 
-			if command == "backup":
-				backup(repl, nodename, args[0])
+		try:
+			hostname = hostname.split("'")[1]
+		except:
+			hostname = "<Undefined>"
+		
+		print("Hostname:",hostname)
 
-			if command == "sync":
-				src = args[0]
-				dst = args[1]
-				#os.chdir(argv[3])
-				repl.update(dst, src, dryrun=dryrun)
+		# make sure we have uos for newer
+		print("importing uos ...")
+		result = str(repl.sendcmd('import uos'))
+		if "Error" in result:
+			print(result)
+			print("Can't continue without uos")
+			break
+		
+		# # only send genhash for command use
+		# if command:
+		# 	print("sending genhash ...")
 
-			# Keep reboot at end of all commands
-			if reboot:
-				print("Sending reboot!")
-				reboot_node(repl)
+		# 	# Define genhash function on remote
+		# 	exec_remote_list(repl, genhash_func.split("\n"))
+				
+		# Exec module handling
+		if exec_module:
+			exec_remote_file(repl, exec_module)
 
-	else:
-		while console and not start_console(repl):
-			print("Lost connection, reconnecting  to {} ...".format(nodename))
-			repl = connect(nodename, debug=debug)
+		if command == "ls":
+			if len(args) == 0:
+				args = [""]
+			for path in args:
+				show_remote_dir(repl, path)
+
+		if command == "sync":
+			if hostname != "Undefined":
+				args = ["boot.py", "main.py", "{}.py".format(hostname)]
+				command = "put"
+			else:
+				print("sync: Error: check hostname - undefined!")
+
+		if command == "put":
+			all_files = []
+			if len(args) > 0:
+				for src in args:
+					all_files += find_imports(src)
+				for imported_file in set(all_files):
+					put_file(repl, imported_file, dryrun=dryrun, use_mpy=use_mpy, cleanup=cleanup_py)
+			else:
+				parser.error("No files specified to put!")
+
+		if command == "backup" and args[0]:
+			backup(repl, nodename, args[0])
+
+		break
+
+	# Keep reboot at end of all commands
+	if reboot:
+		print("Sending reboot!")
+		if reboot_node(repl):
+			sleep(3)
+			repl.disconnect()
+			if console:
+				print("Waiting for 15 seconds before attempting console ...")
+				sleep(15)
+
+	while console:
+		# timeout higher for console output only once a minute
+		repl = connect(nodename, timeout=65, debug=debug, verbose=verbose)
+		
+		if not repl:
+			print("Connect failed!")
+			break
+		
+		# If true, ctrl-c pressed
+		if tail_console(repl):
+			break
+		repl.disconnect()
+		print("Lost connection, reconnecting  to {} ...".format(nodename))
 
 	print("Disconnecting ...\n")
 	repl.disconnect()
