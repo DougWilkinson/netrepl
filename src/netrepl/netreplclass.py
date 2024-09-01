@@ -144,11 +144,15 @@ class NetRepl:
 				in_error = False
 				while not user_exit and not in_error:
 					try:
-						print(self.session.ws.read(100,text_ok=True, size_match=False).decode(), end='')				
+						nextline = self.session.ws.read(100,text_ok=True, size_match=False)				
+						print(nextline.decode(), end='')				
 					except KeyboardInterrupt:
 						user_exit = True
+					except UnicodeDecodeError:
+						print("\n! {}".format(nextline))	
 					except Exception as error:
 						print(error)
+						print(nextline)
 						in_error = True
 						self.disconnect()
 
@@ -157,11 +161,7 @@ class NetRepl:
 
 	def send_break(self, xtra_breaks=False) -> bool:
 		print("Sending break(s) ...")
-		if xtra_breaks:
-			for i in range(15):
-				self.session.sendcmd(chr(3))
-				sleep(1)
-		else:
+		for i in range(3):
 			self.session.sendcmd(chr(3))
 			sleep(1)
 		r = self.session.sendcmd('webrepl')
@@ -347,7 +347,10 @@ class NetRepl:
 		return error_copying
 
 	def backup(self, nodename, path=".", dryrun=True):
-		backup_dir = "{}/{}.{}".format(path, nodename, strftime("%Y%m%d") )
+		if nodename in path:
+			backup_dir = path
+		else:
+			backup_dir = "{}/{}.{}".format(path, nodename, strftime("%Y%m%d") )
 		
 		if dryrun:
 			print("Backup would copy files (dryrun):")
@@ -360,14 +363,15 @@ class NetRepl:
 				print("Could not create backup dir {}".format(backup_dir))
 				return False
 
-			try:
-				os.chdir(backup_dir)
-			except:
+		try:
+			os.chdir(backup_dir)
+		except:
+			if not dryrun:
 				print("Failed to switch to directory {}".format(backup_dir) )
 				return False
 
-			print("Backing up node: {} to {}".format(nodename, backup_dir))		
-			print("Current dir:",os.getcwd())
+		print("Backing up node: {} to {}".format(nodename, backup_dir))		
+		print("Current dir:",os.getcwd())
 
 		total_files = 0
 		total_bytes = 0
@@ -386,7 +390,7 @@ class NetRepl:
 		print("backed up {} files ({} bytes)".format(total_files, total_bytes))
 
 	def reboot_node(self):
-		result = self.session.sendcmd('reboot()')
+		result = self.session.sendcmd('reboot(1)')
 		if b'REBOOTING' in result:
 			print("Reboot confirmed!")
 			return True

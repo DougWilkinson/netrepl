@@ -2,6 +2,7 @@
 # netrepl.py
 
 from sys import argv
+from importlib import import_module
 from time import time, sleep, strftime
 import subprocess
 import argparse
@@ -69,12 +70,47 @@ if len(command) == 0 and not use_mqtt and not console and not reboot:
 # A short list of internal micropython modules I use
 # TODO: Generate or use a complete list from ?? to check for these
 
-skip = ("#", "umqtt.simple", "bluetooth", "ubinascii",
-		"uhashlib", "random", "ustruct", "framebuf", "array",
-		"struct", "dht", "uasyncio", "asyncio", "math",
-		"neopixel", "machine", "time", "network", 
-		"ntptime", "ubinascii", "gc", "json",
+skip = ("#", 
+		"array",
+		"asyncio", 
+		"bluetooth", 
+		"dht", 
+		"framebuf", 
+		"gc", 
+		"json",
+		"machine", 
+		"math",
+		"neopixel", 
+		"network", 
+		"ntptime", 
+		"platform", 
+		"random", 
+		"struct", 
+		"sys",
+		"time", 
+		"uasyncio", 
+		"ubinascii", 
+		"uhashlib", 
+		"umqtt.simple", 
+		"uos", 
+		"ustruct", 
 		"webrepl")
+
+def load_config(name, instance="run"):
+        try:
+                full = {}
+                with open(name) as file:
+                        raw = file.readline()
+                        while raw:
+                                kv = json.loads(raw)
+                                if instance and instance in kv:
+                                        return kv[instance]
+                                full.update(kv)
+                                raw = file.readline()
+                return full
+        except:
+                print("load_file: {} failed.".format(name))
+                return {}
 
 def find_imports(filename) -> list:
 		found = [filename]
@@ -136,7 +172,7 @@ def mqtt_sync(mqtt_server):
 			print("{} - {} - {}".format(state, attrs['ipv4'], hostname ), end="")
 			if state == "online":		
 				print(" -", args)
-				main(hostname)
+				#main(hostname)
 			else:
 				print(" - skipping")
 
@@ -150,6 +186,17 @@ def put(repl, files):
 	else:
 		parser.error("No files specified to put!")
 
+# Take raw variable result and return value as str
+# b"espMAC\r\n'ecfabc27c82e'\r\n" --> 'ecfabc27c82e'
+def getvar(command_result: bytes) -> str:
+	result = str(command_result)
+	if "NameError" in result:
+		return ""
+	if "'" in result:
+		return result.split("'")[1]
+	else:
+		return ""
+	
 def main(hostname):
 	global args
 
@@ -167,23 +214,35 @@ def main(hostname):
 			print("Could not get REPL prompt ...")
 			break
 
-		print("Confirming remote hostname ...")
-		remote_name = str(repl.sendcmd('hostname'))
+		# Should be set if current code
+		remote_name = getvar(repl.sendcmd('hostname'))
+		repl.sendcmd('from network import WLAN' )
+		repl.sendcmd('from ubinascii import hexlify' )
+		repl.sendcmd('espMAC = str(hexlify(WLAN().config("mac")).decode() )' )
+		remote_mac = getvar(repl.sendcmd('espMAC'))
 
-		if "NameError" in remote_name:
-			remote_name = "Undefined"
+		# Get hostname from local macfile if we confirmed espMAC
+		if remote_mac:
+			print("Remote MAC address: {}".format(remote_mac))
+			macfile_name = load_config(remote_mac)
+					
+		print('names: remote="{}", host="{}", macfile="{}"'.format(remote_name, hostname, macfile_name) )
 
 		if strict:
-			if hostname not in remote_name:
-				print('Error: hostname "{}" != remote hostname "{}"'.format(hostname,remote_name) )
+			if hostname != remote_name or hostname != macfile_name:
+				print('strict_names mismatch: one or more do not match')
 				break
 
-		try:
-			remote_name = remote_name.split("'")[1]
-		except:
-			remote_name = "Undefined"
-		
-		print("remote hostname:",remote_name)
+		if macfile_name:
+			print("Using macfile_name: {}".format(macfile_name))
+			hostname = macfile_name
+			# change repl.host to new name in case a reboot/console is done
+			repl.host = macfile_name
+		elif remote_name:
+			print("Using remote_name: {} - macfile_name undetermined".format(remote_name))
+			hostname = remote_name
+		elif command == "sync":
+			print("sync_error: Best effort to copy files, no hostname found")
 
 		# make sure we have uos
 		print("importing uos ...")
@@ -211,11 +270,13 @@ def main(hostname):
 		# 		show_remote_dir(repl, path)
 
 		if command == "sync":
-			if remote_name != "Undefined":
+			if macfile_name:
 				args = ["boot.py", "main.py", "{}.py".format(hostname)]
+				if remote_mac:
+					args.append(remote_mac)
 				put(repl, args)
 			else:
-				print("sync: Error: check hostname - undefined!")
+				print("sync: Error: hostname not found on remote or in local MAC file")
 
 		if command == "put":
 			put(repl, args)
@@ -229,11 +290,11 @@ def main(hostname):
 	if reboot:
 		print("Sending reboot!")
 		if repl.reboot_node():
-			sleep(3)
+			# sleep(3)
 			repl.disconnect()
 			if console:
 				print("Waiting for console ...")
-				sleep(15)
+				sleep(5)
 
 	if console:
 		# timeout higher for console output only once a minute
