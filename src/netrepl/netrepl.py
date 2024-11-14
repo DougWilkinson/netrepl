@@ -7,9 +7,10 @@ from time import time, sleep, strftime
 import subprocess
 import argparse
 import getpass
-from netreplclass import NetRepl
+from netreplclass import NetRepl, logger
 import paho.mqtt.client as mqtt
 import json
+import multiprocessing
 
 try:
 	from mysecrets import mqtt_user, mqtt_pass
@@ -34,7 +35,7 @@ parser.add_argument("-mqtt", action="store_true", help="use nodelist from mqtt")
 parser.add_argument("nodename")
 # use for interactive
 #parser.add_argument("nodename", nargs="*", default="uberdell")
-parser.add_argument("cmd", nargs="?", default="", choices=["ls", "put", "sync", "backup", ""],)
+parser.add_argument("cmd", nargs="?", default="", choices=["ls", "put", "remove", "sync", "backup", ""],)
 parser.add_argument("args", nargs="*", default=[""], metavar="[dir | file1, file2]")
 
 parsed = parser.parse_args(argv[1:])
@@ -96,22 +97,6 @@ skip = ("#",
 		"ustruct", 
 		"webrepl")
 
-def load_config(name, instance="run"):
-        try:
-                full = {}
-                with open(name) as file:
-                        raw = file.readline()
-                        while raw:
-                                kv = json.loads(raw)
-                                if instance and instance in kv:
-                                        return kv[instance]
-                                full.update(kv)
-                                raw = file.readline()
-                return full
-        except:
-                print("load_file: {} failed.".format(name))
-                return {}
-
 def find_imports(filename) -> list:
 		found = [filename]
 		try:
@@ -149,14 +134,14 @@ def on_message(client, userdata, message):
 	#print("message retain flag=",message.retain)
 	#print("Updating heartbeat")
 
-def mqtt_sync(mqtt_server):
+def mqtt_sync(mqtt_query_server):
 	global mqtt_nodes
 	global nodename
-	print("Querying MQTT for hosts ...")
+	print("{} - querying for hosts ...".format(mqtt_query_server))
 
 	client = mqtt.Client()
 	client.username_pw_set(mqtt_user, password=mqtt_pass)
-	client.connect(mqtt_server, 1883, 60)
+	client.connect(mqtt_query_server, 1883, 60)
 	client.on_message=on_message
 	client.subscribe('hass/sensor/esp/#')
 	client.loop_start()
@@ -164,17 +149,48 @@ def mqtt_sync(mqtt_server):
 	sleep(5)
 	client.disconnect()
 
+	print("Found {} mqtt devices".format(len(mqtt_nodes) ) )
+	
+	processes = {}
+
 	for mac, attrs in mqtt_nodes.items():
+		mqtt_server = attrs.get('mysecrets', 'unknown')
+		if mqtt_server != mqtt_query_server:
+			continue
 		if 'hostname' in attrs and 'ipv4' in attrs:
 			hostname = attrs['hostname']
 			state = attrs['state']
 			nodename = hostname
-			print("{} - {} - {}".format(state, attrs['ipv4'], hostname ), end="")
-			if state == "online":		
-				print(" -", args)
+			print("{} - {} - {} - {}".format(state, attrs['ipv4'], mac, hostname ), end="")
+			
+			if state == "online" or reboot:
+				if mac not in processes:
+					processes[mac] = multiprocessing.Process(target=main, args=(hostname,) )
+					print(" - staged")
 				#main(hostname)
 			else:
 				print(" - skipping")
+
+	for mac, proc in processes.items():
+		proc.start()
+
+	in_process = True
+	try:
+		while in_process:
+			# print("netrepl: Still alive ...")
+			in_process = False
+			for mac, proc in processes.items():
+				if proc.is_alive():
+					in_process = True
+					break
+			sleep(1)
+		for mac, proc in processes.items():
+			if proc.exitcode > 0:
+				logger.info("{} : {}: failed".format(mac, mqtt_nodes[mac]['hostname']))
+			else:
+				logger.info("{} : {}: success".format(mac, mqtt_nodes[mac]['hostname']))
+	except KeyboardInterrupt:
+		logger.info("\nUser interrupted netrepl mqtt jobs ...")
 
 def put(repl, files):
 	all_files = []
@@ -186,19 +202,10 @@ def put(repl, files):
 	else:
 		parser.error("No files specified to put!")
 
-# Take raw variable result and return value as str
-# b"espMAC\r\n'ecfabc27c82e'\r\n" --> 'ecfabc27c82e'
-def getvar(command_result: bytes) -> str:
-	result = str(command_result)
-	if "NameError" in result:
-		return ""
-	if "'" in result:
-		return result.split("'")[1]
-	else:
-		return ""
 	
 def main(hostname):
 	global args
+	global console
 
 	repl = NetRepl(hostname, debug=debug, verbose=verbose )
 
@@ -207,108 +214,83 @@ def main(hostname):
 		# repl = FakeRepl(parsed.nodename)
 		# timeout low for sending commands/reply
 		if not repl.connect(timeout=20):
-			print("Connect failed!")
 			break
 
 		if not repl.send_break(xtra_breaks):
-			print("Could not get REPL prompt ...")
 			break
 
-		# Should be set if current code
-		remote_name = getvar(repl.sendcmd('hostname'))
-		repl.sendcmd('from network import WLAN' )
-		repl.sendcmd('from ubinascii import hexlify' )
-		repl.sendcmd('espMAC = str(hexlify(WLAN().config("mac")).decode() )' )
-		remote_mac = getvar(repl.sendcmd('espMAC'))
-
-		# Get hostname from local macfile if we confirmed espMAC
-		if remote_mac:
-			print("Remote MAC address: {}".format(remote_mac))
-			macfile_name = load_config(remote_mac)
-					
-		print('names: remote="{}", host="{}", macfile="{}"'.format(remote_name, hostname, macfile_name) )
-
-		if strict:
-			if hostname != remote_name or hostname != macfile_name:
-				print('strict_names mismatch: one or more do not match')
-				break
-
-		if macfile_name:
-			print("Using macfile_name: {}".format(macfile_name))
-			hostname = macfile_name
-			# change repl.host to new name in case a reboot/console is done
-			repl.host = macfile_name
-		elif remote_name:
-			print("Using remote_name: {} - macfile_name undetermined".format(remote_name))
-			hostname = remote_name
-		elif command == "sync":
-			print("sync_error: Best effort to copy files, no hostname found")
-
-		# make sure we have uos
-		print("importing uos ...")
-		result = str(repl.sendcmd('import uos'))
-		if "Error" in result:
-			print(result)
-			print("Can't continue without uos")
+		# If we can't setup repl environment, exit
+		if not repl.setup():
 			break
 		
-		# # only send genhash for command use
-		# if command:
-		# 	print("sending genhash ...")
+		# The only real reason to change the hostname is if the macfile name changes
+		if repl.macfile_hostname != "unknown" and repl.macfile_hostname != hostname:
+			print("Warning! Device: {} will be renamed to {}".format(hostname, repl.macfile_hostname))
+			hostname = repl.macfile_hostname
+			# change repl.host to new name in case a reboot/console is done
+			repl.host = repl.macfile_hostname
 
-		# 	# Define genhash function on remote
-		# 	exec_remote_list(repl, genhash_func.split("\n"))
-				
-		# # Exec module handling
-		# if exec_module:
-		# 	exec_remote_file(repl, exec_module)
-
-		# if command == "ls":
-		# 	if len(args) == 0:
-		# 		args = [""]
-		# 	for path in args:
-		# 		show_remote_dir(repl, path)
-
+		# Process commands here
+		
 		if command == "sync":
-			if macfile_name:
-				args = ["boot.py", "main.py", "{}.py".format(hostname)]
-				if remote_mac:
-					args.append(remote_mac)
-				put(repl, args)
-			else:
-				print("sync: Error: hostname not found on remote or in local MAC file")
+			if repl.macfile_hostname == "unknown":
+				logger.info("{}: machost file not found, check before using sync".format(hostname) )
+				break
+
+			if not repl.remote_mac:
+				logger.info("{}: remote mac address not found, check before using sync".format(hostname) )
+				break
+			
+			args = ["boot.py", "main.py", "{}.py".format(hostname), repl.remote_mac]
+			
+			logger.info("{}: starting sync ...".format(hostname))
+			put(repl, args)
 
 		if command == "put":
 			put(repl, args)
 
+		if command == "remove":
+			repl.remove_file(args[0])
+
 		if command == "backup" and args[0]:
+			logger.info("{}: starting backup ...".format(hostname))
 			repl.backup(hostname, path=args[0], dryrun=dryrun)
 
 		break
 
-	# Keep reboot at end of all commands
+	# Keep reboot at end of all commands but before console
+
 	if reboot:
-		print("Sending reboot!")
+		print("{} - sending reboot!".format(hostname))
 		if repl.reboot_node():
 			# sleep(3)
 			repl.disconnect()
 			if console:
-				print("Waiting for console ...")
+				print("{} - Waiting for console ...".format(hostname) )
 				sleep(5)
+		else:
+			# if reboot fails, do not attempt console
+			logger.info("{}: reboot failed")
+			exit(1)
 
 	if console:
 		# timeout higher for console output only once a minute
-		if repl.connect(timeout=70):
-			repl.tail_console()
-		else:
-			print("Connect failed!")
+		try:
+			if repl.connect(timeout=70):
+				repl.tail_console()
+			else:
+				print("{} - connect failed!".format(hostname) )
+				exit(2)
+		except KeyboardInterrupt:
+			print("{} - stopping console ...".format(hostname) )
 
 	repl.disconnect()
 	sleep(1)
+	exit(0)
 
 if __name__ == "__main__":
 	if use_mqtt:
-		print(nodename)
+		print("Using mqtt: {}".format(nodename) )
 		mqtt_sync(nodename)
 	else:
 		main(nodename)
