@@ -223,8 +223,8 @@ def main(hostname):
 		if not repl.setup():
 			break
 		
-		# The only real reason to change the hostname is if the macfile name changes
-		if repl.macfile_hostname != "unknown" and repl.macfile_hostname != hostname:
+		# change name if syncing and macfile name is valid and not same 
+		if command == "sync" and repl.macfile_hostname != {} and repl.macfile_hostname != "unknown" and repl.macfile_hostname != hostname:
 			print("Warning! Device: {} will be renamed to {}".format(hostname, repl.macfile_hostname))
 			hostname = repl.macfile_hostname
 			# change repl.host to new name in case a reboot/console is done
@@ -261,12 +261,12 @@ def main(hostname):
 	# Keep reboot at end of all commands but before console
 
 	if reboot:
-		print("{} - sending reboot!".format(hostname))
+		print("{}: sending reboot".format(hostname))
 		if repl.reboot_node():
 			# sleep(3)
 			repl.disconnect()
 			if console:
-				print("{} - Waiting for console ...".format(hostname) )
+				print("{}: Waiting for console ...".format(hostname) )
 				sleep(5)
 		else:
 			# if reboot fails, do not attempt console
@@ -279,10 +279,10 @@ def main(hostname):
 			if repl.connect(timeout=70):
 				repl.tail_console()
 			else:
-				print("{} - connect failed!".format(hostname) )
+				print("{}: connect failed!".format(hostname) )
 				exit(2)
 		except KeyboardInterrupt:
-			print("{} - stopping console ...".format(hostname) )
+			print("{}: stopping console ...".format(hostname) )
 
 	repl.disconnect()
 	sleep(1)

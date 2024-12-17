@@ -137,8 +137,8 @@ def make_mpy(source):
 ########################
 
 class NetRepl:
-	def __init__(self, host, password=None, debug=False, verbose=False) -> None:
-		self.host = host
+	def __init__(self, hostname, password=None, debug=False, verbose=False) -> None:
+		self.hostname = hostname
 		if password is None:
 			self.password = os.environ.get("WRPWD")
 			if self.password is None:
@@ -149,7 +149,7 @@ class NetRepl:
 		self.session = None
 
 	def logprint(self, message):
-		logger.info("{}: {}".format(self.host, message))
+		logger.info("{}: {}".format(self.hostname, message))
 
 	def connect(self, timeout=70) -> bool:
 		if self.connected:
@@ -159,7 +159,7 @@ class NetRepl:
 			try:
 				start_time = time()
 				self.logprint("connecting (timeout={}), try={}".format(timeout, attempt))
-				self.session = Webrepl(**{'host':self.host, 
+				self.session = Webrepl(**{'host':self.hostname, 
 						'password': self.password,
 						'timeout':timeout,
 						'debug': self.debug,
@@ -202,7 +202,7 @@ class NetRepl:
 			# timeout higher for console output only once a minute
 			if self.connect(timeout=70):
 				in_error = False
-				with open(self.host + ".console", mode="a") as console_log:
+				with open(self.hostname + ".console", mode="a") as console_log:
 					while not user_exit and not in_error:
 						try:
 							nextline = self.session.ws.read(100,text_ok=True, size_match=False)				
@@ -222,7 +222,7 @@ class NetRepl:
 							self.disconnect()
 						console_log.flush()
 
-		#print("\nStopping console ...".format(self.host))
+		#print("\nStopping console ...".format(self.hostname))
 
 
 	def send_break(self, xtra_breaks=False) -> bool:
@@ -470,10 +470,10 @@ class NetRepl:
 	def reboot_node(self):
 		result = self.session.sendcmd('reboot(1)')
 		if b'REBOOTING' in result:
-			self.logprint("Reboot confirmed!")
+			self.logprint("{}: Reboot confirmed".format(self.hostname))
 			return True
 		else:
-			self.logprint("Reboot failed!" )
+			self.logprint("{}: Reboot failed!".format(self.hostname) )
 			return False
 
 	# remote_hash returns string with hash or:
@@ -562,7 +562,7 @@ class NetRepl:
 # class FakeRepl:
 # 	def __init__(self, nodename) -> None:
 # 		self.connected = True
-# 		self.host = nodename
+# 		self.hostname = nodename
 # 		self.result = ""
 
 # 	def sendcommand(self, cmd, src=None, dst=None, retries=3) -> bool:
