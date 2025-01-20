@@ -1,35 +1,32 @@
 #!/usr/bin/python3
 # netrepl.py
 
-from sys import argv
 import json
-import struct
 import os
-import sys
 import socket
 from time import time, sleep, strftime
 import subprocess
-import argparse
 import getpass
 import logging
 
-# logger = logging.basicConfig(filename="netrepl.log", level=logging.INFO)
+#load other modules
+from file import File
+from webrepl import Webrepl
 
-# setup logging to console and "portio.log"
-name = 'netrepl'
+# imports related to genhash
+import hashlib
+import binascii
 
-# Don't log everything to file, just errors
+# setup logging
 
+log_name = 'netrepl'
 logging.logfilelevel = logging.INFO
 logging.consolelevel = logging.INFO
-
-logger = logging.getLogger(name)
-
-# Log everything at root logger level (controlled by handlers below)
+logger = logging.getLogger(log_name)
 logger.setLevel(logging.DEBUG)
-logfile = logging.FileHandler(name + ".log")
-logfile.setLevel(logging.logfilelevel)
 
+logfile = logging.FileHandler(log_name + ".log")
+logfile.setLevel(logging.logfilelevel)
 logfile.setFormatter( logging.Formatter('%(asctime)s : %(message)s', datefmt="%Y-%m-%dT%I:%M:%S%z"))
 
 logconsole = logging.StreamHandler()
@@ -39,62 +36,27 @@ logconsole.setFormatter( logging.Formatter('%(message)s', datefmt="%Y-%m-%dT%I:%
 logger.addHandler(logfile)
 logger.addHandler(logconsole)
 
-#load other modules
-from file import File
-from webrepl import websocket, Webrepl
-
-# imports related to genhash
-import hashlib
-import binascii
-
-MPY_EXLCUDES = ("boot.py", 
-				"natives.py",
-				"main.py",
-				"mysecrets.py")
-
-# Local genhash function
-# TODO: use string to define a function?
-		
-def genhash(file):
-	file_hash = hashlib.sha256()
-	try:
-		with open(file, "rb") as handle:
-			buf = handle.read(100)
-			while buf:
-				file_hash.update(buf)
-				buf = handle.read(100)	
-		return binascii.hexlify(file_hash.digest())
-	except:
-		return b'FileNotFound'
+# function for comparing generting hashes to compare files
+# defined using string so we can also upload to device if not defined
 
 genhash_func = """
-import uhashlib
-import ubinascii
+import binascii, hashlib
 def genhash(file):
-	file_hash = uhashlib.sha256()
+	file_hash = hashlib.sha256()
 	with open(file, "rb") as handle:
 		buf = handle.read(100)
 		while buf:
 			file_hash.update(buf)
 			buf = handle.read(100)	
-	print(ubinascii.hexlify(file_hash.digest() ) )
+	return binascii.hexlify(file_hash.digest() ).decode('UTF-8')
 """
 
-def load_config(name, instance="run"):
-        try:
-                full = {}
-                with open(name) as file:
-                        raw = file.readline()
-                        while raw:
-                                kv = json.loads(raw)
-                                if instance and instance in kv:
-                                        return kv[instance]
-                                full.update(kv)
-                                raw = file.readline()
-                return full
-        except:
-                print("load_file: {} failed.".format(name))
-                return {}
+# replaced below with exec()
+def genhash():
+	pass
+
+# define this for use on this end
+exec (genhash_func)
 
 def local_stat(file: File) -> bool:
 	try:
@@ -114,13 +76,6 @@ def local_stat(file: File) -> bool:
 	except:
 		logger.info("Error parsing results from stat()")
 	return False
-
-def local_hash(filename) -> str:
-	hash = genhash(filename)
-	try:
-		return hash.decode('UTF-8')
-	except:
-		return ""
 
 def make_mpy(source):
 	filename = source.split("/")[-1:][0]
@@ -151,7 +106,7 @@ class NetRepl:
 	def logprint(self, message):
 		logger.info("{}: {}".format(self.hostname, message))
 
-	def connect(self, timeout=70) -> bool:
+	def connect(self, timeout=0) -> bool:
 		if self.connected:
 			return True
 		#print("after 1st Webrepl(), before session while loop")
@@ -192,15 +147,15 @@ class NetRepl:
 
 		self.connected = False
 
-	def sendcmd(self, command):
+	def send_command(self, command):
 		return self.session.sendcmd(command)
 
-	def tail_console(self) -> bool:
+	def tail_console(self, timeout=0) -> bool:
 		user_exit = False
 		nextline = b''
 		while not user_exit:
 			# timeout higher for console output only once a minute
-			if self.connect(timeout=70):
+			if self.connect(timeout=timeout):
 				in_error = False
 				with open(self.hostname + ".console", mode="a") as console_log:
 					while not user_exit and not in_error:
@@ -222,15 +177,12 @@ class NetRepl:
 							self.disconnect()
 						console_log.flush()
 
-		#print("\nStopping console ...".format(self.hostname))
-
-
 	def send_break(self, xtra_breaks=False) -> bool:
 		self.logprint("Sending break(s) ...")
 		for i in range(10):
-			self.session.sendcmd(chr(3))
+			self.send_command(chr(3))
 			sleep(.2)
-		r = self.session.sendcmd('webrepl')
+		r = self.send_command('webrepl')
 		#print("result: ", r)
 		
 		if b'module' in r:
@@ -242,7 +194,7 @@ class NetRepl:
 
 
 	def remote_stat(self, file: File) -> bool:
-		result = str(self.session.sendcmd('uos.stat("{}")'.format(file.path) ))
+		result = str(self.send_command('uos.stat("{}")'.format(file.path) ))
 		if "Error" in result:
 			#print(self.result)
 			return False
@@ -264,7 +216,7 @@ class NetRepl:
 	
 	def remote_listdir(self, path="") -> list:
 		try:
-			result = str(self.session.sendcmd('uos.listdir("{}")'.format(path)))
+			result = str(self.send_command('uos.listdir("{}")'.format(path)))
 			#print(result)
 			slashed = result.replace("'",'"')
 			#print(slashed)
@@ -279,14 +231,7 @@ class NetRepl:
 			self.logprint("Error getting remote filelist!")
 		return []
 		
-# def show_remote_dir(session, path=""):
-# 	print("Directory: {}".format(path) )
-# 	for filename in remote_listdir(session, path):
-# 		file = File(filename)
-# 		remote_stat(session, file)
-# 		print("{}  {}  {}".format(file.path, file.size, file.date_modified))
-
-	def put_file(self, source_name, dest_name="", dryrun=True, use_mpy=False, cleanup=False, force=False) -> File:
+	def put_file(self, source_name, dryrun=True, use_mpy=False, force=False) -> File:
 		error_copying = File("error_copying", exists=False)
 		error_hashfile = File("error_hashfile", exists=False)
 
@@ -294,12 +239,7 @@ class NetRepl:
 			only_name = source_name.split("/")[-1:][0]
 		else:
 			only_name = source_name
-		# Do not use .mpy for boot and main or if not a .py file
-		#print("onlyname=", only_name, MPY_EXLCUDES)
-		if only_name in MPY_EXLCUDES or ".py" not in source_name:
-			use_mpy = False
 
-		# Only use mpy if it's a .py file
 		if use_mpy:
 			# generate .mpy and make this the source file
 			#print("using .mpy for {}".format(source_name))
@@ -309,10 +249,9 @@ class NetRepl:
 			# Use original file name as source
 			#print("using {}".format(source_name))
 			source_file = File(source_name)
-			if dest_name == "":
-				#print("source name:", source_name)
-				dest_name = source_name.split("/")[-1:][0]
-				#print("dest_name", dest_name)
+			#print("source name:", source_name)
+			dest_name = source_name.split("/")[-1:][0]
+			#print("dest_name", dest_name)
 			dest_file = File(dest_name)
 
 		#print("after: ", source_name, dest_name)
@@ -327,7 +266,7 @@ class NetRepl:
 
 		dest_file.hash = self.remote_hash(dest_file.path)
 		#print(source_name, dest_file.hash)
-		source_file.hash = local_hash(source_file.path)
+		source_file.hash = genhash(source_file.path)
 
 		#print("hashes: src=", source_file.hash, "dst=", dest_file.hash)
 
@@ -375,7 +314,7 @@ class NetRepl:
 
 	def remove_file(self, filename):
 		try:
-			result = self.session.sendcmd('uos.remove("{}")'.format(filename))
+			result = self.send_command('uos.remove("{}")'.format(filename))
 			if b'Error' not in result:
 				self.logprint("removed: {}".format(filename) )
 			else:
@@ -399,7 +338,7 @@ class NetRepl:
 		error_hashfile = File("error_hashfile", exists=False)
 
 		source_file.hash = self.remote_hash(source_file.path)
-		dest_file.hash = local_hash(dest_file.path)
+		dest_file.hash = genhash(dest_file.path)
 
 		# print("hashes: src=", source_file.hash, "dst=", dest_file.hash)
 
@@ -424,56 +363,17 @@ class NetRepl:
 		self.logprint("Error copying {}".format(source_file.path))
 		return error_copying
 
-	def backup(self, nodename, path=".", dryrun=True):
-		if nodename in path:
-			backup_dir = path
-		else:
-			backup_dir = "{}/{}.{}".format(path, nodename, strftime("%Y%m%d") )
-		
-		if dryrun:
-			self.logprint("Backup would copy files (dryrun):")
-		else:
-			try:
-				os.mkdir(backup_dir)
-			except FileExistsError:
-				pass
-			except:
-				self.logprint("Could not create backup dir {}".format(backup_dir))
-				return False
-
-		try:
-			os.chdir(backup_dir)
-		except:
-			if not dryrun:
-				self.logprint("Failed to switch to directory {}".format(backup_dir) )
-				return False
-
-		self.logprint("Backing up node: {} to {}".format(nodename, backup_dir))		
-		self.logprint("Current dir: {}".format(os.getcwd() ) )
-
-		total_files = 0
-		total_bytes = 0
-
-		for file in self.remote_listdir():
-			result = self.get_file(file, dryrun=dryrun)
-			if result.is_dir:
-				self.logprint("Skipping dir {}".format(file))
-				continue
-			if result.size == 0:
-				self.logprint("Error copying {}".format(file))
-				continue
-			total_files += 1
-			total_bytes += result.size
-
-		self.logprint("backed up {} files ({} bytes)".format(total_files, total_bytes))
-
 	def reboot_node(self):
-		result = self.session.sendcmd('reboot(1)')
+		result = self.send_command('reboot(1)')
 		if b'REBOOTING' in result:
 			self.logprint("{}: Reboot confirmed".format(self.hostname))
 			return True
 		else:
-			self.logprint("{}: Reboot failed!".format(self.hostname) )
+			self.logprint("{}: Reboot failed! Forcing machine reset".format(self.hostname) )
+			try:
+				result = self.send_command(chr(4))
+			except:
+				self.logprint("Disconnect error?")
 			return False
 
 	# remote_hash returns string with hash or:
@@ -483,41 +383,28 @@ class NetRepl:
 
 	def remote_hash(self, filename) -> str:
 		error_hashfile = File("error_hashfile", exists=False)
-		hash = self.session.sendcmd('genhash("{}")'.format(filename) )
+		hash = self.send_command('genhash("{}")'.format(filename) )
 		
-		if hash and b'NameError' in hash:
-			# If NameError, hash function not imported on device, load and try again
-			self.logprint("genhash() function not defined, sending ...")
-			self.exec_remote_list(genhash_func.split("\n"))
-
-			newhash = self.session.sendcmd('genhash("{}")'.format(filename) )
-			#print("newhash: ", newhash)
-			# If failed again, return empty hash
-			if newhash and b'NameError' in newhash:
-				self.logprint("genhash not found!")
-				return "UndefinedError"
-			hash = newhash
-
 		if hash and b'ENOENT' in hash:
 			return "FileNotFoundError"
 		
 		try:
-			return hash.decode('UTF-8').split("\'")[1]
+			return hash.decode('UTF-8').split("'")[1]
 		except:
 			return "HashDecodeError"
 
 	def exec_remote_list(self, exec_list):
-		self.session.sendcmd(chr(5))
+		self.send_command(chr(5))
 		for line in exec_list:
 			result = self.session.pastecmd(line.rstrip())
-		self.session.sendcmd(chr(4))
+		self.send_command(chr(4))
 		self.session.read_cmd(100)
 		self.session.read_cmd(100)
 
 	# Take raw variable result and return value as str
 	# b"espMAC\r\n'ecfabc27c82e'\r\n" --> 'ecfabc27c82e'
 	def getvar(self, variable_name) -> str:
-		result = str(self.sendcmd(variable_name) )
+		result = str(self.send_command(variable_name) )
 		if "NameError" in result:
 			return ""
 		if "'" in result:
@@ -525,73 +412,4 @@ class NetRepl:
 		else:
 			return ""
 
-	def setup(self) -> bool:
 		
-		# Look for hostname on device
-		self.remote_name = self.getvar('hostname')
-		
-		# look for mac address on device
-		self.sendcmd('from network import WLAN' )
-		self.sendcmd('from ubinascii import hexlify' )
-		self.sendcmd('espMAC = str(hexlify(WLAN().config("mac")).decode() )' )
-		self.remote_mac = self.getvar('espMAC')
-
-		# Get hostname from local macfile if we confirmed espMAC
-		if self.remote_mac:
-			self.logprint("Remote MAC address: {}".format(self.remote_mac))
-			self.macfile_hostname = load_config(self.remote_mac)
-		else:
-			self.macfile_hostname = "unknown"
-					
-		self.logprint('remote_hostname="{}", remote_mac="{}", macfile_hostname="{}"'.format(self.remote_name, self.remote_mac, self.macfile_hostname) )
-
-		# make sure we have uos
-		self.logprint("checking for uos ...")
-		result = str(self.sendcmd('import uos'))
-		if "Error" in result:
-			self.logprint(result)
-			self.logprint("uos not imported - stopping")
-			return False
-		
-		self.logprint("setup success!")
-		return True
-		
-
-
-
-# class FakeRepl:
-# 	def __init__(self, nodename) -> None:
-# 		self.connected = True
-# 		self.hostname = nodename
-# 		self.result = ""
-
-# 	def sendcommand(self, cmd, src=None, dst=None, retries=3) -> bool:
-# 		print("cmd: {}, src={}. dst={}".format(cmd, src, dst))
-# 		self.result = cmd + " : results!"
-# 		return True
-	
-# 	def send_break(self):
-# 		print("Break!\n\n>>>\n")
-# 		return True
-# 	def reboot_node(self):
-# 		print("reboot()\n1\n2\n3...")
-# 	def console(self):
-# 		print("11:11:11 nodename console logging ...")
-# 	def backup(self):
-# 		print("backup node!")
-# 	def update(self, dst, src, dryrun=False):
-# 		print("copy src={}, dst={}, dryrun={}".format(src,dst, dryrun))
-# 	def disconnect(self):
-# 		print("repl: disconnect session")
-# 		pass
-
-
-# def exec_remote_file(repl, exec_module):
-# 	with open(exec_module) as f:
-# 		repl.sendcmd(chr(5))
-# 		for line in f:
-# 			#repl.sendcommand(repl.session.sendcmd, 'reboot()')
-# 			result = repl.pastecmd(line.rstrip())
-# 			# print(result)
-# 		repl.sendcmd(chr(4))
-

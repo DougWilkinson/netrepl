@@ -140,7 +140,7 @@ Sec-WebSocket-Key: foo\r
 		self.debugmsg("[d] connecting to %s %s" % (host,port))
 		self.debugmsg("timeout: {}".format(self.timeout) )
 		self.s = socket.socket()
-		if self.timeout is not None:
+		if self.timeout is not None and self.timeout > 0:
 			self.s.settimeout(self.timeout)
 		ai = socket.getaddrinfo(host, port)
 		addr = ai[0][4]

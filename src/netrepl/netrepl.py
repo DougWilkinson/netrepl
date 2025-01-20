@@ -2,12 +2,13 @@
 # netrepl.py
 
 from sys import argv
+import os
 from importlib import import_module
 from time import time, sleep, strftime
 import subprocess
 import argparse
 import getpass
-from netreplclass import NetRepl, logger
+from netreplclass import NetRepl, logger, genhash_func
 import paho.mqtt.client as mqtt
 import json
 import multiprocessing
@@ -63,6 +64,13 @@ if len(command) == 0 and not use_mqtt and not console and not reboot:
 	parser.error("Nothing to do!")
 #print(argv)
 
+# files that should not be compiled
+# include in put()
+MPY_EXLCUDES = ("boot.py", 
+				"natives.py",
+				"main.py",
+				"mysecrets.py")
+
 # Recursive function takes a .py file and looks for imported
 # modules not native to micropython
 # returns a full list of all imported modules as a list of .py files
@@ -76,19 +84,26 @@ skip = ("#",
 		"asyncio", 
 		"bluetooth", 
 		"dht", 
-		"framebuf", 
-		"gc", 
+		"framebuf",
+		"functools",
+		"gc",
+		"inspect",
+		"io",
 		"json",
 		"machine", 
 		"math",
+		#"microdot",
 		"neopixel", 
 		"network", 
 		"ntptime", 
 		"platform", 
-		"random", 
+		"random",
+		"re",
 		"struct", 
 		"sys",
-		"time", 
+		"time",
+		"traceback",
+		"types",
 		"uasyncio", 
 		"ubinascii", 
 		"uhashlib", 
@@ -98,19 +113,29 @@ skip = ("#",
 		"webrepl")
 
 def find_imports(filename) -> list:
+		filename = filename.lower()
+		debug and print("looking for imports in: {}".format(filename))
 		found = [filename]
 		try:
 			with open(filename) as file:
-				line = file.readline()
+				line = True
 				while line:
-					if "import" in line or "from" in line:
-						items = line.strip().split(" ")
+					line = file.readline().lower()
+					#debug and print("checking: {}".format(line))
+					items = line.strip().split(" ")
+					if len(items) > 1 and filename.split(".")[0] == items[1]:
+						debug and print("filename=import: {}".format(line))
+						continue
+					if  len(items) > 3 and filename.split(".")[0] == items[3]:
+						debug and print("filename=import: {}".format(line))
+						continue
+					if "import" in line or "from " in line:
+						debug and print("{}: import or from: {}".format(filename, line))
 						if (items[1] not in skip and "#" not in items[0]):
 							if items[0] == "from" or items[0] == "import":
 								nextfile = items[1] + ".py"
 								#print("looking at: ", nextfile)
 								found += find_imports(nextfile)
-					line = file.readline()
 		except FileNotFoundError:
 			pass
 
@@ -133,6 +158,23 @@ def on_message(client, userdata, message):
 	#print("message qos=",message.qos)
 	#print("message retain flag=",message.retain)
 	#print("Updating heartbeat")
+
+# function to load values from json file
+def load_config(name, instance="run"):
+	try:
+		full = {}
+		with open(name) as file:
+			raw = file.readline()
+			while raw:
+				kv = json.loads(raw)
+				if instance and instance in kv:
+						return kv[instance]
+				full.update(kv)
+				raw = file.readline()
+		return full
+	except:
+		print("load_file: {} failed.".format(name))
+		return {}
 
 def mqtt_sync(mqtt_query_server):
 	global mqtt_nodes
@@ -192,15 +234,126 @@ def mqtt_sync(mqtt_query_server):
 	except KeyboardInterrupt:
 		logger.info("\nUser interrupted netrepl mqtt jobs ...")
 
-def put(repl, files):
+def put_files(repl, files):
+
 	all_files = []
+	
 	if len(files) > 0:
 		for src in files:
 			all_files += find_imports(src)
+	
 		for imported_file in set(all_files):
-			repl.put_file(imported_file, dryrun=dryrun, use_mpy=use_mpy, cleanup=cleanup_py, force=force)
+			
+			mpy_ok = use_mpy and imported_file not in MPY_EXLCUDES and ".py" in imported_file
+
+			repl.put_file(imported_file, dryrun=dryrun, 
+				use_mpy=mpy_ok, force=force)
 	else:
 		parser.error("No files specified to put!")
+
+def setup(netrepl) -> bool:
+	
+	# Look for hostname on device
+	netrepl.remote_name = netrepl.getvar('hostname')
+	
+	# look for mac address on device
+	netrepl.send_command('from network import WLAN' )
+	netrepl.send_command('from ubinascii import hexlify' )
+	netrepl.send_command('espMAC = str(hexlify(WLAN().config("mac")).decode() )' )
+	netrepl.remote_mac = netrepl.getvar('espMAC')
+
+	# Get hostname from local macfile if we confirmed espMAC
+	if netrepl.remote_mac:
+		netrepl.logprint("Remote MAC address: {}".format(netrepl.remote_mac))
+		netrepl.macfile_hostname = load_config(netrepl.remote_mac)
+	else:
+		netrepl.macfile_hostname = "unknown"
+				
+	netrepl.logprint('remote_hostname="{}", remote_mac="{}", macfile_hostname="{}"'.format(netrepl.remote_name, netrepl.remote_mac, netrepl.macfile_hostname) )
+
+	# make sure we have uos
+	netrepl.logprint("checking for uos ...")
+	result = str(netrepl.send_command('import uos'))
+	if "Error" in result:
+		netrepl.logprint(result)
+		netrepl.logprint("uos not imported - stopping")
+		return False
+	
+	# If NameError, hash function not imported on device, load and try again
+	netrepl.logprint("sending genhash() ...")
+	netrepl.exec_remote_list(genhash_func.split("\n"))
+
+	hash = netrepl.send_command('genhash("{}")'.format('boot.py') )
+
+	if hash and b'NameError' in hash:
+		netrepl.logprint("Unable to find/upload genhash()")
+		return
+		
+	netrepl.logprint("setup success!")
+	return True
+
+def reboot_node(netrepl):
+	# result = netrepl.send_command('reboot(1)')
+
+	# if b'REBOOTING' in result:
+	# 	logger.info("{}: Reboot confirmed".format(netrepl.hostname))
+	# 	return True
+
+	# logger.error("{}: Reboot failed! Forcing machine reset".format(netrepl.hostname) )
+
+	# try:
+	result = netrepl.send_command(chr(4))
+	print(result)
+	# return True
+	# except:
+	# logger.error("Disconnect error?")
+	# return False
+
+
+
+def backup(netrepl, nodename, path=".", dryrun=True):
+	if nodename in path:
+		backup_dir = path
+	else:
+		backup_dir = "{}/{}.{}".format(path, nodename, strftime("%Y%m%d") )
+	
+	if dryrun:
+		logger.info("Backup would copy files (dryrun):")
+	else:
+		try:
+			os.mkdir(backup_dir)
+		except FileExistsError:
+			pass
+		except:
+			logger.error("Could not create backup dir {}".format(backup_dir))
+			return False
+
+	try:
+		os.chdir(backup_dir)
+	except:
+		if not dryrun:
+			netrepl.logprint("Failed to switch to directory {}".format(backup_dir) )
+			return False
+
+	logger.info("Backing up node: {} to {}".format(nodename, backup_dir))		
+	logger.info("Current dir: {}".format(os.getcwd() ) )
+
+	total_files = 0
+	total_bytes = 0
+
+	for file in netrepl.remote_listdir():
+		result = netrepl.get_file(file, dryrun=dryrun)
+		if result.is_dir:
+			logger.info("Skipping dir {}".format(file))
+			continue
+		if result.size == 0:
+			logger.error("Error copying {}".format(file))
+			continue
+		total_files += 1
+		total_bytes += result.size
+
+	logger.info("backed up {} files ({} bytes)".format(total_files, total_bytes))
+
 
 	
 def main(hostname):
@@ -220,7 +373,7 @@ def main(hostname):
 			break
 
 		# If we can't setup repl environment, exit
-		if not repl.setup():
+		if not setup(repl):
 			break
 		
 		# change name if syncing and macfile name is valid and not same 
@@ -244,17 +397,17 @@ def main(hostname):
 			args = ["boot.py", "main.py", "{}.py".format(hostname), repl.remote_mac]
 			
 			logger.info("{}: starting sync ...".format(hostname))
-			put(repl, args)
+			put_files(repl, args)
 
 		if command == "put":
-			put(repl, args)
+			put_files(repl, args)
 
 		if command == "remove":
 			repl.remove_file(args[0])
 
 		if command == "backup" and args[0]:
 			logger.info("{}: starting backup ...".format(hostname))
-			repl.backup(hostname, path=args[0], dryrun=dryrun)
+			backup(repl, hostname, path=args[0], dryrun=dryrun)
 
 		break
 
@@ -262,9 +415,10 @@ def main(hostname):
 
 	if reboot:
 		print("{}: sending reboot".format(hostname))
-		if repl.reboot_node():
-			# sleep(3)
-			repl.disconnect()
+		if repl.connect():
+			if reboot_node(repl): 
+				# sleep(3)
+				repl.disconnect()
 			if console:
 				print("{}: Waiting for console ...".format(hostname) )
 				sleep(5)
@@ -276,11 +430,7 @@ def main(hostname):
 	if console:
 		# timeout higher for console output only once a minute
 		try:
-			if repl.connect(timeout=70):
-				repl.tail_console()
-			else:
-				print("{}: connect failed!".format(hostname) )
-				exit(2)
+			repl.tail_console(timeout=0)
 		except KeyboardInterrupt:
 			print("{}: stopping console ...".format(hostname) )
 
