@@ -182,15 +182,19 @@ class NetRepl:
 		for i in range(10):
 			self.send_command(chr(3))
 			sleep(.2)
-		r = self.send_command('webrepl')
-		#print("result: ", r)
 		
-		if b'module' in r:
-			self.logprint("repl prompt accessed!")
-			return True
-		else:
-			self.logprint("Could not get REPL prompt")
-			return False
+		retries = 5
+		while retries > 0:
+			self.logprint("checking for repl - retries left ({})".format(retries) )
+			r = self.send_command('webrepl')
+			if b'module' in r:
+				self.logprint("repl accessed!")
+				return True
+			sleep(3)
+			retries -= 1
+		
+		self.logprint("no REPL prompt")
+		return False
 
 
 	def remote_stat(self, file: File) -> bool:
@@ -253,8 +257,6 @@ class NetRepl:
 			dest_name = source_name.split("/")[-1:][0]
 			#print("dest_name", dest_name)
 			dest_file = File(dest_name)
-
-		#print("after: ", source_name, dest_name)
 		
 		missing_source = File("missing_source", exists=False)
 		if not local_stat(source_file):
@@ -270,13 +272,6 @@ class NetRepl:
 
 		#print("hashes: src=", source_file.hash, "dst=", dest_file.hash)
 
-		# Do not overwrite existing secrets!
-		#print("desthash: ", dest_file.hash)
-		#print(force, use_mpy, source_name, dest_file.hash)
-		if not force and ('mysecrets' in source_name and 'Error' not in dest_file.hash):
-			self.logprint("skip   : mysecrets already exists")
-			return dest_file
-		
 		# Skip if hash same or copy it
 		if source_file.hash == dest_file.hash:
 			self.logprint("skip   : {}".format(source_file.path) )

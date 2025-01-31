@@ -1,68 +1,143 @@
 #!/usr/bin/python3
-# netrepl.py
+# mpwm.py
 
 from sys import argv
 import os
+import re
+import pathlib
 from importlib import import_module
 from time import time, sleep, strftime
-import subprocess
 import argparse
 import getpass
 from netreplclass import NetRepl, logger, genhash_func
 import paho.mqtt.client as mqtt
 import json
 import multiprocessing
+from microdot import Microdot
+import asyncio
+from mysecrets import mqtt_user, mqtt_pass, mqtt_servers, device_topic, device_config_path
 
-try:
-	from mysecrets import mqtt_user, mqtt_pass
-except:
-	mqtt_user = ""
-	mqtt_pass = ""
+mqtt_nodes = {}
 
-parser = argparse.ArgumentParser(prog="mpyrepl")
-parser.add_argument("-b", action="store_true", help="send extra breaks")
-parser.add_argument("-v", action="store_true", help="verbose")
-parser.add_argument("-vv", action="store_true", help="debug")
-parser.add_argument("-c", action="store_true", help="tail console")
-parser.add_argument("-e", metavar="module.py", help="execute module in repl, showing ouput")
-parser.add_argument("-strict", action="store_true", help="strict checking")
-parser.add_argument("-m", action="store_true", help="copy .mpy version of module if possible")
-parser.add_argument("-f", action="store_true", help="force copy")
-parser.add_argument("-d", action="store_true", help="cleanup/delete .py versions when copying .mpy to remote")
-parser.add_argument("-n", action="store_true", help="don't actually do anything, dry run")
-parser.add_argument("-r", action="store_true", help="reboot node, do actions (if any) first")
-parser.add_argument("-s", nargs=1, help="use mqtt server")
-parser.add_argument("-mqtt", action="store_true", help="use nodelist from mqtt")
-parser.add_argument("nodename")
-# use for interactive
-#parser.add_argument("nodename", nargs="*", default="uberdell")
-parser.add_argument("cmd", nargs="?", default="", choices=["ls", "put", "remove", "sync", "backup", ""],)
-parser.add_argument("args", nargs="*", default=[""], metavar="[dir | file1, file2]")
+# function to load values from json file
+def load_config(name, instance="run"):
+	try:
+		full = {}
+		with open(name) as file:
+			raw = file.readline()
+			while raw:
+				kv = json.loads(raw)
+				if instance and instance in kv:
+						return kv[instance]
+				full.update(kv)
+				raw = file.readline()
+		return full
+	except:
+		print("load_file: {} failed.".format(name))
+		return {}
 
-parsed = parser.parse_args(argv[1:])
-#print(parsed)
 
-nodename = parsed.nodename
-command = parsed.cmd
-args = parsed.args
-dryrun = parsed.n
-reboot = parsed.r
-force = parsed.f
-xtra_breaks = parsed.b
-console = parsed.c
-verbose = parsed.v
-debug = parsed.vv
-strict = parsed.strict
-exec_module = parsed.e
-use_mpy = parsed.m
-cleanup_py = parsed.d
-use_mqtt = parsed.mqtt
-if parsed.s:
-	mqtt_server = parsed.s[0]
 
-if len(command) == 0 and not use_mqtt and not console and not reboot:
-	parser.error("Nothing to do!")
-#print(argv)
+regex = re.compile("^[0-9a-f]..........[0-9a-f]$")
+config_files = [file for file in pathlib.Path(device_config_path).glob("*") if regex.match(file.name)]
+
+mac2name = {}
+name2mac = {}
+
+for file in config_files:
+	name = load_config(file)
+	mac2name[file.name] = name
+	name2mac[name] = file.name 
+
+app = Microdot()
+
+main_loop = asyncio.new_event_loop()
+
+settings_page = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sensors:</title>
+  <style>
+    body {{
+      font-family: New Courier;
+      display: flex;
+      flex-direction: column;
+      align-items: left;
+      margin-top: 20px;
+    }}
+
+	    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+
+    th, td {{
+      border: 1px solid #ccc;
+      padding: 1px;
+      text-align: left;
+    }}
+
+    th {{
+      background-color: #f4f4f4;
+    }}
+    .button {{
+      background-color: #007bff;
+      color: white;
+      padding: 2px 2px;
+      margin: 2px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 11px;
+    }}
+    .button:hover {{
+      background-color: #0056b3;
+    }}
+	#image-frame {{
+      margin-top: 30px;
+      width: 80%;
+      max-width: 600px;
+      height: 400px;
+      border: 2px solid #ccc;
+    }}
+    iframe {{
+      width: 100%;
+      height: 100%;
+      border: none;
+    }}
+
+  </style>
+</head>
+<body>
+  <h1>Sensors Table</h1>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>mac</th>
+        <th>status</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+
+  {}
+
+    </tbody>
+  </table>
+
+  <script>
+    function SelectDevice(url) {{
+      window.location.href = url;
+    }}
+  </script>
+  </body>
+</html>
+'''
+
 
 # files that should not be compiled
 # include in put()
@@ -141,98 +216,120 @@ def find_imports(filename) -> list:
 
 		return found
 
-mqtt_nodes = {}
+class MqttQuery:
+	def __init__(self, mqtt_query_server):
+		global mqtt_nodes
+		print("{} - query started ...".format(mqtt_query_server))
 
-def on_message(client, userdata, message):
-	global mqtt_nodes
-	mac_address = message.topic.split('/')[3]
-	if mac_address not in mqtt_nodes:
-		mqtt_nodes[mac_address] = {"mac": mac_address}
-	if '/state' in message.topic:
-		mqtt_nodes[mac_address]['state'] = message.payload.decode()
-		return
-	if '/attr' in message.topic:
-		#print(message.topic, " = ",message.payload)
-		mqtt_nodes[mac_address].update(json.loads(message.payload) )
-	#print("in on_message received " ,hbvalue)
-	#print("message qos=",message.qos)
-	#print("message retain flag=",message.retain)
-	#print("Updating heartbeat")
+		self.server = mqtt_query_server
+		self.client = mqtt.Client()
+		self.client.username_pw_set(mqtt_user, password=mqtt_pass)
+		self.client.connect(mqtt_query_server, 1883, 60)
+		self.client.on_message=self.on_message
+		self.client.subscribe('hass/sensor/esp/+/state')
+		self.client.loop_start()
+		self.nodes = {}
 
-# function to load values from json file
-def load_config(name, instance="run"):
-	try:
-		full = {}
-		with open(name) as file:
-			raw = file.readline()
-			while raw:
-				kv = json.loads(raw)
-				if instance and instance in kv:
-						return kv[instance]
-				full.update(kv)
-				raw = file.readline()
-		return full
-	except:
-		print("load_file: {} failed.".format(name))
-		return {}
+	def on_message(self, client, userdata, mqtt_message):
+		global mqtt_nodes
+		# device_id = "{}/{}".format(self.server, message.topic.split('/')[3] )
+		device_id = "{}".format(mqtt_message.topic.split('/')[3] )
+		topic = mqtt_message.topic
+		message = mqtt_message.payload.decode()
+		# if device_id in mqtt_nodes:
+		# 	return
 
-def mqtt_sync(mqtt_query_server):
-	global mqtt_nodes
-	global nodename
-	print("{} - querying for hosts ...".format(mqtt_query_server))
+		if '/state' in topic:
+			if device_id in self.nodes:
+				mqtt_nodes[device_id] = self.nodes[device_id]
+				mqtt_nodes[device_id]['status'] = "unknown"
+				return
+		
+		if '/attr' in message.topic:
 
-	client = mqtt.Client()
-	client.username_pw_set(mqtt_user, password=mqtt_pass)
-	client.connect(mqtt_query_server, 1883, 60)
-	client.on_message=on_message
-	client.subscribe('hass/sensor/esp/#')
-	client.loop_start()
-	
-	sleep(5)
-	client.disconnect()
+			mqtt_nodes[device_id] = message
 
+		# 	#print(message.topic, " = ",message.payload)
+		# 	mqtt_nodes[self.server][mac_address].update(json.loads(message.payload) )
+
+
+for server in mqtt_servers:
+	MqttQuery(server)
+
+# def get_status(mqtt_nodes, node):
+# 	for server in
+# 	if node in mqtt_nodes:
+# 		return mqtt_nodes[node].get('state', 'unknown')
+# 	return 'unknown'
+
+# @app.route('/')
+# async def hello(request):
+#     return build_menu(), 200, {'Content-Type': 'text/html'}
+
+# build html list of nodes and buttons for sync, backup, reboot, etc
+def build_menu():
+	options = ""
+	for node, mac in name2mac.items():
+		status = mqtt_nodes.get(mac, 'unknown')
+		button_def = '<tr> <td>{}</td> <td> {} </td> <td> {} </td> <td> <button class="button" onclick="SelectDevice(\'/action/{}\')">sync</button> </td> </tr>'.format(node, mac, status, node)
+		#button_def = "            <p><a href='/res/{}'>{}</a>".format(res, res)
+		options += button_def
+
+	a = settings_page.format(options)
+	print(a)
+	return a
+
+@app.route('/')
+async def show_nodes(request):
 	print("Found {} mqtt devices".format(len(mqtt_nodes) ) )
 	
-	processes = {}
+	# processes = {}
 
-	for mac, attrs in mqtt_nodes.items():
-		mqtt_server = attrs.get('mysecrets', 'unknown')
-		if mqtt_server != mqtt_query_server:
-			continue
-		if 'hostname' in attrs and 'ipv4' in attrs:
-			hostname = attrs['hostname']
-			state = attrs['state']
-			nodename = hostname
-			print("{} - {} - {} - {}".format(state, attrs['ipv4'], mac, hostname ), end="")
-			
-			if state == "online" or reboot:
-				if mac not in processes:
-					processes[mac] = multiprocessing.Process(target=main, args=(hostname,) )
-					print(" - staged")
-				#main(hostname)
-			else:
-				print(" - skipping")
+	# for server, nodes in mqtt_nodes.items():
+	# 	for mac, attrs in nodes.items():
+	# 		mqtt_server = attrs.get('mysecrets', 'unknown')
+	# 		# if not match, don't use that entry?
+	# 		# or only do online devices?
+	# 		if mqtt_server != server:
+	# 			continue
+	# 		if 'hostname' in attrs and 'ipv4' in attrs:
+	# 			hostname = attrs['hostname']
+	# 			state = attrs['state']
+	# 			nodename = hostname
+	# 			print("{} - {} - {} - {}".format(state, attrs['ipv4'], mac, hostname ), end="")
+				
+	# 			if state == "online" or reboot:
+	# 				if mac not in processes:
+	# 					processes[mac] = multiprocessing.Process(target=main, args=(hostname,) )
+	# 					print(" - staged")
+	# 				#main(hostname)
+	# 			else:
+	# 				print(" - skipping")
 
-	for mac, proc in processes.items():
-		proc.start()
+	return build_menu(), 200, {'Content-Type': 'text/html'}
 
-	in_process = True
-	try:
-		while in_process:
-			# print("netrepl: Still alive ...")
-			in_process = False
-			for mac, proc in processes.items():
-				if proc.is_alive():
-					in_process = True
-					break
-			sleep(1)
-		for mac, proc in processes.items():
-			if proc.exitcode > 0:
-				logger.info("{} : {}: failed".format(mac, mqtt_nodes[mac]['hostname']))
-			else:
-				logger.info("{} : {}: success".format(mac, mqtt_nodes[mac]['hostname']))
-	except KeyboardInterrupt:
-		logger.info("\nUser interrupted netrepl mqtt jobs ...")
+
+
+	# for mac, proc in processes.items():
+	# 	proc.start()
+
+	# in_process = True
+	# try:
+	# 	while in_process:
+	# 		# print("netrepl: Still alive ...")
+	# 		in_process = False
+	# 		for mac, proc in processes.items():
+	# 			if proc.is_alive():
+	# 				in_process = True
+	# 				break
+	# 		sleep(1)
+	# 	for mac, proc in processes.items():
+	# 		if proc.exitcode > 0:
+	# 			logger.info("{} : {}: failed".format(mac, mqtt_nodes[mac]['hostname']))
+	# 		else:
+	# 			logger.info("{} : {}: success".format(mac, mqtt_nodes[mac]['hostname']))
+	# except KeyboardInterrupt:
+	# 	logger.info("\nUser interrupted netrepl mqtt jobs ...")
 
 def put_files(netrepl, files):
 	#print(files)
@@ -298,16 +395,22 @@ def setup(netrepl) -> bool:
 	return True
 
 def reboot_node(netrepl):
-	result = netrepl.send_command('reboot(1)')
+	# result = netrepl.send_command('reboot(1)')
 
-	if b'REBOOTING' in result:
-		netrepl.logprint("reboot confirmed")
-		return True
+	# if b'REBOOTING' in result:
+	# 	logger.info("{}: Reboot confirmed".format(netrepl.hostname))
+	# 	return True
 
-	netrepl.logprint("reboot failed - sending machine reset")
+	# logger.error("{}: Reboot failed! Forcing machine reset".format(netrepl.hostname) )
 
+	# try:
 	result = netrepl.send_command(chr(4))
-	return True
+	print(result)
+	# return True
+	# except:
+	# logger.error("Disconnect error?")
+	# return False
+
 
 
 def backup(netrepl, nodename, path=".", dryrun=True):
@@ -437,9 +540,7 @@ def main(hostname):
 	sleep(1)
 	exit(0)
 
-if __name__ == "__main__":
-	if use_mqtt:
-		print("Using mqtt: {}".format(nodename) )
-		mqtt_sync(nodename)
-	else:
-		main(nodename)
+main_loop.create_task(app.start_server(host='0.0.0.0', port=5001, debug=True))
+app.run(debug=True, host='0.0.0.0', port=5001)
+main_loop.run_forever()
+
