@@ -98,6 +98,8 @@ class NetRepl:
 			self.password = os.environ.get("WRPWD")
 			if self.password is None:
 				self.password = getpass.getpass("Enter webrepl password: ")
+		else:
+			self.password = password
 		self.debug = debug
 		self.verbose = verbose
 		self.connected = False
@@ -126,15 +128,24 @@ class NetRepl:
 			except KeyboardInterrupt:
 				self.logprint("ctrl-C during connect" )
 				return False
+			except socket.gaierror as e:
+				if e.errno == -2:
+					self.logprint("host {} not found".format(self.hostname) )
+					return False
+			except OSError as e:
+				if e.errno == 113:
+					self.logprint("No route to {} found".format(self.hostname) )
+					return False
 			except Exception as e:
 				self.logprint("connect timed out, retry in 10 seconds" )
 				self.logprint(e)
+
+				# wait 10 seconds if not connected
+				while time() - start_time < 11:
+					sleep(1)
 			
-			# wait 10 seconds
-			while time() - start_time < 11:
-				sleep(1)
 		
-		self.logprint("Connect attempts failed, giving up")
+		self.logprint("Connection attempts failed")
 		return False
 
 	def disconnect(self) -> None:
@@ -148,7 +159,10 @@ class NetRepl:
 		self.connected = False
 
 	def send_command(self, command):
-		return self.session.sendcmd(command)
+		result = self.session.sendcmd(command)
+		if b'MemoryError' in result:
+			raise MemoryError
+		return result
 
 	def tail_console(self, timeout=0) -> bool:
 		user_exit = False
@@ -358,18 +372,30 @@ class NetRepl:
 		self.logprint("Error copying {}".format(source_file.path))
 		return error_copying
 
-	def reboot_node(self):
-		result = self.send_command('reboot(1)')
-		if b'REBOOTING' in result:
-			self.logprint("{}: Reboot confirmed".format(self.hostname))
-			return True
-		else:
+	def reboot_node(self, reconnect=False):
+		
+		success = False
+		try:
+			result = self.send_command('reboot(1)')
+			if b'REBOOTING' in result:
+				success = True
+				self.logprint("{}: Reboot confirmed".format(self.hostname))
+		except MemoryError:
+			pass
+		
+		if not success:
 			self.logprint("{}: Reboot failed! Forcing machine reset".format(self.hostname) )
 			try:
 				result = self.send_command(chr(4))
 			except:
 				self.logprint("Disconnect error?")
+
+		# False = maybe reboot happened
+		if not reconnect:
 			return False
+		
+		self.connected = False
+		return self.connect(timeout=20)
 
 	# remote_hash returns string with hash or:
 	# "FileNotFound" = genhash remote function returned no file found

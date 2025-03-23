@@ -256,6 +256,9 @@ def put_files(netrepl, files):
 	else:
 		parser.error("No files specified to put!")
 
+
+# returns True if setup is good
+# will raise error if memory issues
 def setup(netrepl) -> bool:
 	
 	# Look for hostname on device
@@ -296,18 +299,46 @@ def setup(netrepl) -> bool:
 		
 	netrepl.logprint("setup success!")
 	return True
+	
+def reboot_node(netrepl, reconnect=False):
+	# try:
+	# 	result = netrepl.send_command('reboot(0)')
 
-def reboot_node(netrepl):
-	result = netrepl.send_command('reboot(1)')
+	# 	if b'REBOOTING' in result:
+	# 		netrepl.logprint("reboot confirmed")
+	# 		return True
+	# except MemoryError:
+	# 	pass
 
-	if b'REBOOTING' in result:
-		netrepl.logprint("reboot confirmed")
-		return True
+	# netrepl.logprint("reboot failed - sending machine reset")
 
-	netrepl.logprint("reboot failed - sending machine reset")
+	# result = netrepl.send_command(chr(4))
+	# return True
 
-	result = netrepl.send_command(chr(4))
-	return True
+	netrepl.connected = False
+	success = False
+	
+	try:
+		result = netrepl.send_command('reboot(1)')
+		if b'REBOOTING' in result:
+			success = True
+			netrepl.logprint("{}: Reboot confirmed".format(netrepl.hostname))
+	except MemoryError:
+		pass
+	
+	if not success:
+		netrepl.logprint("{}: Reboot failed! Forcing machine reset".format(netrepl.hostname) )
+		try:
+			result = netrepl.send_command(chr(4))
+		except:
+			netrepl.logprint("Disconnect error?")
+
+	# False = maybe reboot happened
+	if not reconnect:
+		return False
+	
+	return netrepl.connect(timeout=20)
+
 
 
 def backup(netrepl, nodename, path=".", dryrun=True):
@@ -363,17 +394,31 @@ def main(hostname):
 
 	while command or reboot:
 
-		# netrepl = FakeRepl(parsed.nodename)
-		# timeout low for sending commands/netreply
-		if not netrepl.connect(timeout=20):
-			break
+		attempts = 2
+		while attempts > 0:
 
-		if not netrepl.send_break(xtra_breaks):
-			break
+			# timeout low for sending commands/netreply
+			if not netrepl.connect(timeout=20):
+				break
+			
+			try:
+				# stop if we can't break repl
+				if not netrepl.send_break(xtra_breaks):
+					netrepl.logprint("send_break failed")
+					break
+				
+				# stop if setup fails for any reason other than memory
+				if not setup(netrepl):
+					break
+				
+				attempts = 0
 
-		# If we can't setup netrepl environment, exit
-		if not setup(netrepl):
-			break
+			except MemoryError:
+				netrepl.logprint("low memory failure - attempting reboot")
+				reboot_node(netrepl)
+				attempts -= 1
+				if attempts == 0:
+					netrepl.logprint("low memory recovery failed - stopping")
 		
 		# change name if syncing and macfile name is valid and not same 
 		if command == "sync" and netrepl.macfile_hostname != {} and netrepl.macfile_hostname != "unknown" and netrepl.macfile_hostname != hostname:
