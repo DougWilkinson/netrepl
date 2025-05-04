@@ -3,6 +3,7 @@ import os
 import sys
 import socket
 from time import time
+import threading
 
 WEBREPL_REQ_S = "<2sBBQLH64s"
 WEBREPL_PUT_FILE = 1
@@ -36,11 +37,20 @@ class websocket:
 		self.s.send(hdr)
 		self.s.send(data)
 
-	def recvexactly(self, sz):
+	def recvexactly(self, sz, user_exit=None):
 		res = b""
 		while sz:
-			#print("recvexactly: in while loop")
-			data = self.s.recv(sz)
+			#print("recvexactly: in while loop: user_exit:", user_exit)
+			try:
+				data = self.s.recv(sz)
+			except socket.timeout:
+				#print("device timeout during websocket read: user_exit:", user_exit)
+				if user_exit is not None:
+					#print("user_exit: ", user_exit)
+					if user_exit.is_set():
+						return res
+				continue
+			
 			if not data:
 				break
 			res += data
@@ -52,14 +62,15 @@ class websocket:
 		if self.debug:
 			print(msg)
 
-	def read(self, size, text_ok=False, size_match=True):
+	def read(self, size, text_ok=False, size_match=True, user_exit=None):
 		if not self.buf:
 			while True:
-				hdr = self.recvexactly(2)
+				#print("in read loop")
+				hdr = self.recvexactly(2, user_exit)
 				assert len(hdr) == 2
 				fl, sz = struct.unpack(">BB", hdr)
 				if sz == 126:
-					hdr = self.recvexactly(2)
+					hdr = self.recvexactly(2, user_exit)
 					assert len(hdr) == 2
 					(sz,) = struct.unpack(">H", hdr)
 				if fl == 0x82:
@@ -68,10 +79,11 @@ class websocket:
 					break
 				self.debugmsg("[i] Got unexpected websocket record of type %x, skipping it" % fl)
 				while sz:
+					#print("in skip loop")
 					skip = self.s.recv(sz)
 					self.debugmsg("[i] Skip data: %s" % skip)
 					sz -= len(skip)
-			data = self.recvexactly(sz)
+			data = self.recvexactly(sz, user_exit)
 			assert len(data) == sz
 			self.buf = data
 

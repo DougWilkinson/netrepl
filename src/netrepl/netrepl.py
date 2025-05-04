@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/home/doug/ha/bin/python3
 # netrepl.py
 
 from sys import argv
@@ -8,10 +8,11 @@ from time import time, sleep, strftime
 import subprocess
 import argparse
 import getpass
-from netreplclass import NetRepl, logger, genhash_func
+from netreplclass import NetRepl, genhash_func
 import paho.mqtt.client as mqtt
 import json
 import multiprocessing
+import pathlib
 
 try:
 	from mysecrets import mqtt_user, mqtt_pass
@@ -160,7 +161,8 @@ def on_message(client, userdata, message):
 	#print("Updating heartbeat")
 
 # function to load values from json file
-def load_config(name, instance="run"):
+def load_config(self, name, instance="run"):
+	mac_file = pathlib.Path(self.ams_path / name)
 	try:
 		full = {}
 		with open(name) as file:
@@ -228,11 +230,11 @@ def mqtt_sync(mqtt_query_server):
 			sleep(1)
 		for mac, proc in processes.items():
 			if proc.exitcode > 0:
-				logger.info("{} : {}: failed".format(mac, mqtt_nodes[mac]['hostname']))
+				print("{} : {}: failed".format(mac, mqtt_nodes[mac]['hostname']))
 			else:
-				logger.info("{} : {}: success".format(mac, mqtt_nodes[mac]['hostname']))
+				print("{} : {}: success".format(mac, mqtt_nodes[mac]['hostname']))
 	except KeyboardInterrupt:
-		logger.info("\nUser interrupted netrepl mqtt jobs ...")
+		print("\nUser interrupted netrepl mqtt jobs ...")
 
 def put_files(netrepl, files):
 	#print(files)
@@ -273,7 +275,7 @@ def setup(netrepl) -> bool:
 	# Get hostname from local macfile if we confirmed espMAC
 	if netrepl.remote_mac:
 		netrepl.logprint("Remote MAC address: {}".format(netrepl.remote_mac))
-		netrepl.macfile_hostname = load_config(netrepl.remote_mac)
+		netrepl.macfile_hostname = netrepl.load_config(netrepl.remote_mac)
 	else:
 		netrepl.macfile_hostname = "unknown"
 				
@@ -355,7 +357,7 @@ def backup(netrepl, nodename, path=".", dryrun=True):
 		except FileExistsError:
 			pass
 		except:
-			logger.error("Could not create backup dir {}".format(backup_dir))
+			netrepl.logprint("Could not create backup dir {}".format(backup_dir))
 			return False
 
 	try:
@@ -377,7 +379,7 @@ def backup(netrepl, nodename, path=".", dryrun=True):
 			netrepl.logprint("Skipping dir {}".format(file))
 			continue
 		if result.size == 0:
-			logger.error("Error copying {}".format(file))
+			netrepl.logprint("Error copying {}".format(file))
 			continue
 		total_files += 1
 		total_bytes += result.size
@@ -394,54 +396,53 @@ def main(hostname):
 
 	while command or reboot:
 
-		attempts = 2
-		while attempts > 0:
+		# attempts = 2
+		# while attempts > 0:
 
-			# timeout low for sending commands/netreply
-			if not netrepl.connect(timeout=20):
-				break
+		# 	# timeout low for sending commands/netreply
+		# 	if not netrepl.connect(timeout=20):
+		# 		break
 			
-			try:
-				# stop if we can't break repl
-				if not netrepl.send_break(xtra_breaks):
-					netrepl.logprint("send_break failed")
-					break
+		# 	try:
+		# 		# stop if we can't break repl
+		# 		netrepl.send_break(xtra_breaks)
 				
-				# stop if setup fails for any reason other than memory
-				if not setup(netrepl):
-					break
+		# 		# stop if setup fails for any reason other than memory
+		# 		if not setup(netrepl):
+		# 			break
 				
-				attempts = 0
+		# 		attempts = 0
 
-			except MemoryError:
-				netrepl.logprint("low memory failure - attempting reboot")
-				reboot_node(netrepl)
-				attempts -= 1
-				if attempts == 0:
-					netrepl.logprint("low memory recovery failed - stopping")
+		# 	except MemoryError:
+		# 		netrepl.logprint("low memory failure - attempting reboot")
+		# 		reboot_node(netrepl)
+		# 		attempts -= 1
+		# 		if attempts == 0:
+		# 			netrepl.logprint("low memory recovery failed - stopping")
 		
-		# change name if syncing and macfile name is valid and not same 
-		if command == "sync" and netrepl.macfile_hostname != {} and netrepl.macfile_hostname != "unknown" and netrepl.macfile_hostname != hostname:
-			print("Warning! Device: {} will be renamed to {}".format(hostname, netrepl.macfile_hostname))
-			hostname = netrepl.macfile_hostname
-			# change netrepl.host to new name in case a reboot/console is done
-			netrepl.host = netrepl.macfile_hostname
+		# # change name if syncing and macfile name is valid and not same 
+		# if command == "sync" and netrepl.macfile_hostname != {} and netrepl.macfile_hostname != "unknown" and netrepl.macfile_hostname != hostname:
+		# 	print("Warning! Device: {} will be renamed to {}".format(hostname, netrepl.macfile_hostname))
+		# 	hostname = netrepl.macfile_hostname
+		# 	# change netrepl.host to new name in case a reboot/console is done
+		# 	netrepl.host = netrepl.macfile_hostname
 
 		# Process commands here
 		
 		if command == "sync":
-			if netrepl.macfile_hostname == "unknown":
-				netrepl.logprint("{}: machost file not found, check before using sync".format(hostname) )
-				break
+			# if netrepl.macfile_hostname == "unknown":
+			# 	netrepl.logprint("{}: machost file not found, check before using sync".format(hostname) )
+			# 	break
 
-			if not netrepl.remote_mac:
-				netrepl.logprint("{}: remote mac address not found, check before using sync".format(hostname) )
-				break
+			# if not netrepl.remote_mac:
+			# 	netrepl.logprint("{}: remote mac address not found, check before using sync".format(hostname) )
+			# 	break
 			
-			args = ["boot.py", "main.py", "{}.py".format(hostname), netrepl.remote_mac]
+			# args = ["boot.py", "main.py", "{}.py".format(hostname), netrepl.remote_mac]
 			
-			netrepl.logprint("{}: starting sync ...".format(hostname))
-			put_files(netrepl, args)
+			netrepl.update()
+			# netrepl.logprint("{}: starting sync ...".format(hostname))
+			# netrepl.put_files()
 
 		if command == "put":
 			put_files(netrepl, args)
@@ -458,25 +459,27 @@ def main(hostname):
 	# Keep reboot at end of all commands but before console
 
 	if reboot:
-		print("{}: sending reboot".format(hostname))
-		if netrepl.connect():
-			if reboot_node(netrepl): 
-				# sleep(3)
-				netrepl.disconnect()
-			if console:
-				print("{}: Waiting for console ...".format(hostname) )
-				sleep(5)
-		else:
-			# if reboot fails, do not attempt console
-			netrepl.logprint("{}: reboot failed")
+		if not netrepl.reboot_node():
 			exit(1)
+		# print("{}: sending reboot".format(hostname))
+		# if netrepl.connect():
+		# 	if netrepl.reboot_node(netrepl): 
+		# 		# sleep(3)
+		# 		netrepl.disconnect()
+		# 	if console:
+		# 		print("{}: Waiting for console ...".format(hostname) )
+		# 		sleep(5)
+		# else:
+		# 	# if reboot fails, do not attempt console
+		# 	netrepl.logprint("{}: reboot failed")
+		# 	exit(1)
 
 	if console:
 		# timeout higher for console output only once a minute
 		try:
 			netrepl.tail_console(timeout=0)
 		except KeyboardInterrupt:
-			print("{}: stopping console ...".format(hostname) )
+			netrepl.logprint("{}: stopping console ...".format(hostname) )
 
 	netrepl.disconnect()
 	sleep(1)
