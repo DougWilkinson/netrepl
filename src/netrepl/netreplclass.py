@@ -1,9 +1,10 @@
 #!/usr/bin/python3
-# netrepl.py
+# netreplclass.py
 
 import json
 import re
 import os
+from stat import S_ISDIR
 import socket
 from time import time, sleep, strftime
 import subprocess
@@ -94,6 +95,7 @@ skip = ("#",
 		"platform", 
 		"random",
 		"re",
+		"os",
 		"struct", 
 		"sys",
 		"time",
@@ -115,14 +117,19 @@ skip = ("#",
 ########################
 
 class NetRepl:
-	def __init__(self, hostname, password=None, debug=False, verbose=False) -> None:
+	def __init__(self, hostname, nicegui_log=None, user_exit=None, password=None, debug=False, verbose=False) -> None:
 		self.hostname = hostname
+
+		if user_exit is None:
+			self.user_exit = threading.Event()
+		else:
+			self.user_exit = user_exit
 
 		self.ams_path = pathlib.Path(os.environ.get("AMS_PATH") )
 		self.node_path = pathlib.Path(os.environ.get("HOME") + "/" + hostname)
 
 		self.logfile_path = self.node_path / (hostname + ".log")
-		self.weblog_path = self.node_path / (hostname + ".weblog")
+		#self.weblog_path = self.node_path / (hostname + ".weblog")
 
 		if not self.node_path.exists():
 			os.mkdir(self.node_path)
@@ -138,6 +145,7 @@ class NetRepl:
 		self.connected = False
 		self.session = None
 
+		self.nicegui_log = nicegui_log
 		self.logger = logging.getLogger(hostname)
 		if self.logger.handlers:
 			self.logger.handlers.clear()
@@ -149,8 +157,8 @@ class NetRepl:
 		self.logfile.setFormatter( logging.Formatter('%(asctime)s : %(message)s', datefmt="%Y-%m-%dT%I:%M:%S%z"))
 
 		# temp file for tailing console log
-		self.weblog = logging.FileHandler(self.weblog_path, mode="w")
-		self.weblog.setLevel(logging.INFO)
+		# self.weblog = logging.FileHandler(self.weblog_path, mode="w")
+		# self.weblog.setLevel(logging.INFO)
 		#self.logfile.setFormatter( logging.Formatter('%(asctime)s : %(message)s', datefmt="%Y-%m-%dT%I:%M:%S%z"))
 
 		self.logconsole = logging.StreamHandler()
@@ -158,7 +166,7 @@ class NetRepl:
 		self.logconsole.setFormatter( logging.Formatter('%(message)s', datefmt="%Y-%m-%dT%I:%M:%S%z"))
 
 		self.logger.addHandler(self.logfile)
-		self.logger.addHandler(self.weblog)
+		# self.logger.addHandler(self.weblog)
 		self.logger.addHandler(self.logconsole)
 
 	def make_mpy(self, source):
@@ -174,28 +182,34 @@ class NetRepl:
 
 
 	def local_stat(self, file: File) -> bool:
+		#self.logprint("local_stat: file.path: {}".format(file.path))
 		try:
 			stats = os.stat(file.path)
 			# print("mode: ", stats.st_mode)
-			if stats.st_mode == 33261 or stats.st_mode == 33188:
+
+			if S_ISDIR(stats.st_mode):
+				self.logprint("{} is a directory".format(file.path) )
+				file.is_dir = True
+				return True
+			else:
 				file.size = int(stats.st_size)
 				file.date_modified = stats.st_mtime
 				file.exists = True
-			if stats.st_mode == 16877:
-				self.logprint("{} is a directory".format(file.path) )
-				file.is_dir = True
-			return True
+				return True
 		except FileNotFoundError:
-			# print("File not found local: {}".format(file.path))
+			# print("local file not found: {}".format(file.path))
 			file.exists = False
 		except:
-			self.logprint("Error parsing results from stat()")
+			self.logprint("Error getting file stats: {}".format(file.path))
+
 		return False
 
 
 	def logprint(self, message):
+		if not self.user_exit.is_set() and self.nicegui_log:
+			self.nicegui_log.push(message)
 		self.logger.info("{}: {}".format(self.hostname, message))
-		self.weblog.flush()
+		#self.weblog.flush()
 		self.logconsole.flush()
 
 	def connect(self, timeout=30) -> bool:
@@ -257,9 +271,7 @@ class NetRepl:
 			raise ImportError
 		return result
 
-	def tail_console(self, timeout=5, user_exit=None, action="") -> bool:
-		if user_exit is None:
-			user_exit = threading.Event()
+	def tail_console(self, timeout=30, action="") -> bool:
 
 		if action == "reboot":
 			self.reboot_node()
@@ -268,16 +280,23 @@ class NetRepl:
 			if not self.update():
 				return False
 
+		if action == "backup":
+			if not self.backup():
+				return False
+
 		nextline = b''
-		while not user_exit.is_set():
+		while not self.user_exit.is_set():
 			# timeout higher for console output only once a minute
 			if self.connect(timeout=timeout):
 				in_error = False
 				# with open(self.hostname + ".console", mode="a") as console_log:
 				# 	with open(self.hostname + ".weblog", mode="w") as web_log:
-				while not user_exit.is_set() and not in_error:
+				while not self.user_exit.is_set() and not in_error:
 					try:
-						nextline = self.session.ws.read(300,text_ok=True, size_match=False, user_exit=user_exit)				
+						nextline = self.session.ws.read(300,text_ok=True, size_match=False, user_exit=self.user_exit)
+						if nextline == b'LONG_TIMEOUT':
+							print("tail_console: in_loop: LONG_TIMEOUT - breaking")
+							break			
 						prefixed_line = nextline.replace(b'\n',b'\n> ').decode()
 						if len(nextline) > 2:
 							print(prefixed_line, end='')
@@ -293,9 +312,22 @@ class NetRepl:
 						in_error = True
 							# console_log.flush()
 							# web_log.flush()
-				print("self.disconnect() in tail_console")
+
 				self.disconnect()
-		print("tail_console exiting")
+
+				if self.user_exit.is_set():
+					print("tail_console: user exited")
+				
+				if in_error:
+					print("tail_console: error during console tail, reconnecting")
+					self.logprint("tail_console: error during console tail, reconnecting")
+					sleep(3)
+				else:
+					print("tail_console: connection appears stale, reconnecting")
+					self.logprint("tail_console: connection appears stale, reconnecting")
+					sleep(3)
+					
+		
 
 	def send_break(self, xtra_breaks=False):
 		
@@ -372,7 +404,7 @@ class NetRepl:
 			only_name = source_name
 		
 		name_no_ext = only_name.split(".")[0]
-
+		print("put_file: {}".format(name_no_ext) )
 		if ".py" in source_name and use_mpy:
 			# generate .mpy and make this the source file
 			#print("using .mpy for {}".format(source_name))
@@ -381,13 +413,17 @@ class NetRepl:
 		else:
 			# Use original file name as source
 			#print("using {}".format(source_name))
-			source_file = File(self.ams_path / source_name)
+			if "/" in source_name:
+				source_file = File(source_name)
+			else:
+				source_file = File(self.ams_path / source_name)
 			#print("source name:", source_name)
 			#print("dest_name", dest_name)
 			dest_file = File(only_name)
 		
 		missing_source = File("missing_source", exists=False)
 		if not self.local_stat(source_file):
+			print("put_file: source file {} not found".format(source_name) )
 			return missing_source
 
 		# directory is handled by calling function
@@ -461,24 +497,34 @@ class NetRepl:
 		error_hashfile = File("error_hashfile", exists=False)
 
 		source_file.hash = self.remote_hash(source_file.path)
-		dest_file.hash = genhash(dest_file.path)
+		
+		try:
+			dest_file.hash = genhash(dest_file.path)
+		except:
+			dest_file.hash = ""
 
 		# print("hashes: src=", source_file.hash, "dst=", dest_file.hash)
 
 		# If already exists and hashes match, skip
 		# print(self.local_stat(local_file) )
 		if source_file.hash == dest_file.hash:
-			self.logprint("{} - confirmed same".format(source_file.path) )
+			self.logprint("Skip   : {}".format(source_file.path) )
 			return source_file
 
 		if dryrun:
 			self.logprint("Get    : {}".format(source_file.path))
 			return source_file
 		else:
-			self.logprint("Copying: {}".format(source_file.path))
+			self.logprint("Copy   : {}".format(source_file.path, dest_file.path) )
+
+		print("get_file: source_file: {} ({} bytes)".format(source_file.path, source_file.size) )
+
 		self.session.get_file(source_file.path, dest_file.path)
+
 		self.local_stat(dest_file)
-		# print("local: ", remote_file.path, remote_file.size)
+
+		print("local after copy: {} ({} bytes)".format(dest_file.path, dest_file.size) )
+
 		if dest_file.size == source_file.size:
 			#print("copied {} ({} bytes)".format(remote_file.path, local_file.size) )
 			return source_file
@@ -494,32 +540,36 @@ class NetRepl:
 		if not self.send_break():
 			return False
 		
-		# try:
-		# 	if not self.send_break():
-		# 		return False
-		
-		# 	self.logprint("sending reboot" )
+		self.logprint("Trying reboot(3)" )
 
-		# 	result = self.send_command('reboot(1)')
-		# 	self.logprint(result)
-		# 	if b'REBOOTING' in result:
-		# 		self.logprint("Reboot confirmed")
-		# 		self.connected = False
-		# 		return True
-
-		# except MemoryError:
-		# 	pass
-		
 		try:
-			result = self.send_command('reboot(1)')
-			self.logprint("ctrl-D sent, wait for reboot")
-			sleep(10)
-			self.connected = False
-			return True
-		except Exception as e:
-			self.logprint("Disconnect error reported: {}".format(e) )
 
-		return False
+			result = self.send_command('reboot(3)')
+			self.logprint(result)
+
+			if b'REBOOTING' in result:
+
+				self.logprint("Reboot confirmed")
+
+			else:
+
+				result = self.send_command( chr(4) )
+				self.disconnect()
+				self.logprint("ctrl-D sent")
+
+			self.disconnect()
+			self.connected = False
+			self.logprint("wait for reboot")
+
+			sleep(5)
+			return True
+
+
+		except Exception as e:
+
+			self.logprint("Disconnect error reported: {}".format(e) )
+			return False
+
 	# remote_hash returns string with hash or:
 	# "FileNotFound" = genhash remote function returned no file found
 	# "HashError" = genhash was not created or had some other error
@@ -659,6 +709,9 @@ class NetRepl:
 						line = file.readline().lower()
 						#debug and print("checking: {}".format(line))
 						items = line.strip().split(" ")
+						if "#fakeimport" in line:
+							found.append(items[1])
+							continue
 						if len(items) > 1 and filename.split(".")[0] == items[1]:
 							self.logger.debug("filename=import: {}".format(line))
 							continue
@@ -674,7 +727,7 @@ class NetRepl:
 									found += self.find_imports(nextfile)
 			except FileNotFoundError:
 				pass
-
+			#print("find_imports: found:", found)
 			return found
 
 	def put_files(self, files, dryrun=False, force=False, mpy_ok=True):
@@ -684,7 +737,7 @@ class NetRepl:
 			for src in files:
 				all_files += self.find_imports(src)
 
-			#print(all_files)
+			#print("put_files: all_files:", all_files)
 			all_files_success = True
 			for imported_file in set(all_files):
 
@@ -708,8 +761,6 @@ class NetRepl:
 	def update(self):
 		self.logprint("starting update ...")
 
-		#self.reboot_node()
-
 		if not self.setup():
 			return False
 				
@@ -722,5 +773,57 @@ class NetRepl:
 		if result:
 			self.reboot_node()
 			return True
-	
+
 		return False
+
+	def backup(self) -> bool:
+		self.logprint("starting backup ...")
+		
+		# connect and setup
+		if not self.setup():
+			return False
+
+		backup_dir = self.node_path / "backup.{}".format(strftime("%Y%m%d") )				
+
+		try:
+			os.mkdir(backup_dir)
+		except FileExistsError:
+			pass
+		except:
+			self.logprint("Could not create backup dir {}".format(backup_dir))
+			return False
+
+		try:
+			os.chdir(backup_dir)
+		except:
+			self.logprint("Failed to switch to directory {}".format(backup_dir) )
+			return False
+
+		self.logprint("Backing up node: {} to {}".format(self.hostname, backup_dir))		
+
+		total_files = 0
+		total_bytes = 0
+
+		errors = 0
+		for file in self.remote_listdir():
+			result = self.get_file(file, dryrun=False)
+			if result.is_dir:
+				self.logprint("Skipping remote dir {}".format(file))
+				continue
+			if result.size == 0:
+				self.logprint("Error copying {}".format(file))
+				errors += 1
+				continue
+
+			total_files += 1
+			total_bytes += result.size
+
+		self.logprint("backed up {} files ({} bytes)".format(total_files, total_bytes))
+		
+		if errors > 0:
+			self.logprint("Encountered {} errors - not rebooting".format(errors))
+			return False
+
+		self.logprint("Backup success - rebooting ...")		
+		self.reboot_node()
+		return True

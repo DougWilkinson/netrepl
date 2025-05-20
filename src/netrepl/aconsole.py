@@ -1,19 +1,23 @@
 # aconsole.py
 
 from nicegui import ui, app, Client
-import paho.mqtt.client as mqtt
+from mysecrets import mqtt_servers, ams_path
 import json
 import multiprocessing
 from microdot import Microdot
 import asyncio
-from mysecrets import mqtt_user, mqtt_pass, mqtt_servers, device_topic, device_config_path
 from netreplclass import NetRepl, genhash_func
 import threading
 import subprocess
 import re
 import time
+import pathlib
+from datetime import datetime
+from ngmqttserver import NGMQTTServer, mqtt_nodes
+import os
 
-mqtt_nodes = {}
+waitfor_continue = threading.Event()
+
 
 attributes = {"freq": 80.0, 
 			  "rgblight": 3, 
@@ -29,217 +33,35 @@ attributes = {"freq": 80.0,
 			  "main": 3, 
 			  "mysecrets": ""}
 
-esptool_modes = { "esp32s3mini": "esptool.py --port /dev/{} --chip esp32s3 --baud 460800 write_flash 0 {}",
-			   "erase_flash": "esptool.py --port /dev/{} erase_flash",
-			   "chip_id": "esptool.py --port /dev/{} chip_id",
-			   "esp32s3dev": "esptool.py --port /dev/{} --chip esp32s3 --baud 460800 write_flash 0 {}" }
+esptool_modes = { 
+	"esp32-s3mini": "esptool.py --port /dev/{} --chip esp32s3 --baud 460800 write_flash 0 {}",
+	"esp32-s2fnr2mini": "esptool.py --port /dev/{} --chip esp32s2 --baud 460800 write_flash 0x1000 {}",
+	"esp32-d0wd-v3": "esptool.py --port /dev/{} --chip esp32 --baud 460800 write_flash 0x1000 {}",
+	"esp32-d0wdq6": "esptool.py --port /dev/{} --chip esp32 --baud 460800 write_flash 0x1000 {}",
+	"erase_flash": "esptool.py --after no_reset --port /dev/{} erase_flash",
+	"chip_id": "esptool.py --after no_reset --port /dev/{} chip_id",
+	"chip_id_reset": "esptool.py --port /dev/{} chip_id",
+	"esp32-s3dev": "esptool.py --port /dev/{} --chip esp32s3 --baud 460800 write_flash 0 {}" 
+	}
 
-class MQTTServer:
-	def __init__(self, mqtt_query_server):
-		print("{} - query started ...".format(mqtt_query_server))
 
-		self.server = mqtt_query_server
-		self.client = mqtt.Client()
-		self.client.username_pw_set(mqtt_user, password=mqtt_pass)
-		self.client.connect(mqtt_query_server, 1883, 60)
-		self.client.on_message=self.on_message
-		self.client.subscribe('hass/sensor/esp/+/state')
-		self.client.subscribe('hass/sensor/esp/+/attrs')
-		self.client.loop_start()
+style_sheet = '''
+	<style>
+	.ag-theme-balham {
+		--ag-foreground-color: rgb(126, 46, 132);
+		--ag-background-color: rgb(249, 245, 227);
+		--ag-header-foreground-color: rgb(204, 245, 172);
+		--ag-header-background-color: rgb(209, 64, 129);
+		--ag-odd-row-background-color: rgb(0, 0, 0, 0.03);
+		--ag-header-column-resize-handle-color: rgb(126, 46, 132);
 
-	def add_update_node(self, topic, message):
-		global mqtt_nodes
-		if type(topic) != str:
-			return
-		device_id = "{}".format(topic.split('/')[3] )
-		if device_id not in mqtt_nodes:
-			mqtt_nodes[device_id] = {}
+		--ag-font-size: 26px;
+		--ag-font-family: monospace;
+	}
+	</style>
+	'''
 
-		if "/attrs" in topic:
-
-			message = json.loads(message)
-
-			for k,v in message.items():
-				mqtt_nodes[device_id][k] = v
-
-		if "/state" in topic:
-			mqtt_nodes[device_id]['status'] = message
-
-	def on_message(self, client, userdata, mqtt_message):
-		#print(client.host, mqtt_message.topic)
-		# device_id = "{}/{}".format(self.server, message.topic.split('/')[3] )
-		topic = mqtt_message.topic
-		server = client.host
-		
-		message = mqtt_message.payload.decode()
-		self.add_update_node( topic, message)
-
-	# async def update_nodes():
-	# 	global mqtt_nodes
-	# 	while True:
-	# 		for server in mqtt_servers:
-
-servers = {}
-for server in mqtt_servers:
-	servers[server] = MQTTServer(server)
-
-row_data = ["loading...","",""]
-
-class ReadFile:
-	def __init__(self, filename, log):
-		self.filename = filename
-		self.opened = False
-		self.log = log
-		self.handle = None
-
-	def open(self):
-		if self.handle:
-			return True
-		try:
-			self.handle = open(self.filename)
-			return True
-		except:
-			self.log.push("waiting for {}".format(self.filename))
-			return False
-
-		# self.buffer = []
-		# last = ["..."]
-		# next = "..."
-		# while next:
-		# 	next = self.handle.readline()
-		# 	last.append(next)
-		# 	if len(last) > 50:
-		# 		last.pop(0)
-
-	def readline(self):
-		if not self.open():
-			return
-		next_lines = self.handle.readlines()
-		for line in next_lines:
-			if line:
-				self.log.push(line)
-
-@ui.page('/test')
-async def test(client: Client):
-	print('preparing')
-	await client.connected()
-	print('connected')
-	log = ui.log(max_lines=500).classes('h-screen')
-	log.push("Logging started ...")
-	#print("tabs: {}\n".format(app.storage.tab))
-	#print("client: {}\n".format(app.storage.client))
-	#print("user: {}\n".format(app.storage.user))
-	#print("general: {}\n".format(app.storage.general))
-	#print("browser: {}\n".format(app.storage.browser))
-	await client.disconnected()
-	print('disconnected')
-
-"""
-(ha) doug@uberdell:~/ha$ esptool.py --port /dev/ttyACM2 chip_id
-esptool.py v4.8.1
-Serial port /dev/ttyACM2
-Connecting...
-Detecting chip type... ESP32-S3
-Chip is ESP32-S3 (QFN56) (revision v0.2)
-Features: WiFi, BLE, Embedded Flash 4MB (XMC), Embedded PSRAM 2MB (AP_3v3)
-Crystal is 40MHz
-MAC: cc:ba:97:1d:37:f4
-Uploading stub...
-Running stub...
-Stub running...
-Warning: ESP32-S3 has no Chip ID. Reading MAC instead.
-MAC: cc:ba:97:1d:37:f4
-Hard resetting via RTS pin...
-"""
-
-def flash_module(device, log):
-	print("{}: starting esptool (flash)".format(device))
-
-	log.push("reading chip_id\n")
-
-	chip_id_args = esptool_modes["chip_id"].format(device).split()
-
-	chip_id_output = ""
-	try:
-		chip_id_output = subprocess.check_output(chip_id_args) 
-		for line in chip_id_output.decode().split("\n"):
-			log.push(line)
-		log.push(" ")
-	
-	except subprocess.CalledProcessError as e:
-		log.push("Error: {}".format(e.output.decode()))
-		return
-		
-	mac_address = ""
-	chip_type = ""
-
-	for line in chip_id_output.decode().split("\n"):
-		if "MAC" in line:
-			mac_colon=line.split(' ')[1]
-			mac_address = re.sub(r':', '', mac_colon)
-		if "Chip is" in line:
-			chip_type=line.split(' ')[2]
-		if "Embedded PSRAM 2MB" in line:
-			chip_type="esp32s3mini"
-		if "Embedded PSRAM 8MB" in line:
-			chip_type="esp32s3dev"
-	
-	if not chip_type or not mac_address:
-		log.push("Error: could not determine chip_type or mac_address")
-		return
-	
-	# chip_type: esp32s3mini, esp32s3dev, esp32, esps2mini
-	#log.style("font-weight: bold;")
-	log.push("chip_type: {}".format(chip_type) )
-	log.push("mac_address: {}".format(mac_address))
-	log.push(" ")
-
-	log.push("{}: erasing flash\n".format(device) )
-	log.push(" ")
-
-	erase_args = esptool_modes["erase_flash"].format(device).split()
-
-	try:
-		erase_flash_output = subprocess.check_output(erase_args )
-		#log.push(erase_args)
-		for line in erase_flash_output.decode().split("\n"):
-			if "Success" in line:
-				log.push(line)
-	
-	except subprocess.CalledProcessError as e:
-		log.push("Error: {}".format(e.output.decode()))
-		return
-
-	# esptool.py --port /dev/ttyACM2 --chip esp32s3 --baud 460800 write_flash 0 esp32s3/ESP32_GENERIC_S3-FLASH_4M-20250415-v1.25.0.bin
-
-	log.push("writing flash\n".format(device))
-
-	flash_file = "/home/doug/ha/flash/{}/latest.bin".format(chip_type)
-	
-	flash_args = esptool_modes[chip_type].format(device, flash_file).split()
-
-	try:
-		write_flash_output = b'simulate write_flash'
-		write_flash_output = subprocess.check_output(flash_args )
-		
-		#log.push(flash_args )
-		for line in write_flash_output.decode().split("\n"):
-			if "Wrote" in line:
-				log.push(line)
-		#log.push(write_flash_output.decode())
-
-	except subprocess.CalledProcessError as e:
-		log.push("Error: {}".format(e.output.decode()))
-		return
-
-	log.push("flash complete\n".format(device))
-
-	log.push("creating/copying files\n")
-
-	with open("/home/doug/ams/{}".format(mac_address), mode="w") as f:
-		f.write('{{ "run": "{}" }}\n'.format(mac_address) )
-
-	files = """cd /home/doug/ams
+rshell_commands = """cd {}
 cp {} /pyboard
 cp boot.py /pyboard
 cp esp*.py /pyboard
@@ -252,134 +74,669 @@ cp core.py /pyboard
 cp flag.py /pyboard
 cp newsensor.py /pyboard
 cp versions.py /pyboard
-cp /home/doug/ams/hassdocker/mysecrets.py /pyboard
+cp hassdocker/mysecrets.py /pyboard
 repl ~ import machine ~ machine.reset() ~
 """
-	with open("file_copy_list", mode="w") as f:
-		f.write('{}\n'.format(files.format(mac_address) ) )
 
-	log.push(files.format(mac_address))
+# Initialize MQTT servers based on mysecrets
+servers = {}
+for server in mqtt_servers:
+	servers[server] = NGMQTTServer(server)
 
-	log.push("starting rshell\n")
+row_data = ["loading...","",""]
 
-	rshell_args = "rshell -p /dev/{} -f file_copy_list".format(device).split()
-	log.push(rshell_args)
+output = []
 
-	time.sleep(5)
+def call_check_output(command, thread_done):
+	global output
 
-	rshell_output = b'simulate rshell'
-	try:
-		rshell_output = subprocess.check_output(rshell_args )
-		log.push(rshell_args)
-		log.push(rshell_output.decode())
+	output.insert(0, (subprocess.check_output(command) ) )
+	thread_done.set()
+
+async def outsource_function(command):
+	global output
+	thread_done = asyncio.Event()
+
+	process = threading.Thread(target=call_check_output, args=(command, thread_done))
+	process.start()
+
+	await thread_done.wait()
+
+# function to call esptool with hard reset (default)
+async def esptool_functions(port, action, log):
+	global output
+
+	if action == "reset":
+
+		print("{}: starting esptool (reset_port)".format(port))
+
+		log.push("resetting port on {}\n".format(port) )
+
+		reset_args = esptool_modes["chip_id_reset"].format(port).split()
+
+		print("before await outsource_function")
+		await outsource_function(reset_args)
+
+		print("after await outsource_function")
+		result = output[0].decode()
+
+		for line in result.split("\n"):
+			log.push(line)
+
+		# try:
+		# 	subprocess.check_output(reset_args) 
+		# 	log.push(" ")
+		# 	log.push("port reset\n")
+
+		# except subprocess.CalledProcessError as e:
+		# 	print("Error: {}".format(e.output.decode()))
+		# 	log.push("Error: {}".format(e.output.decode()))
+
+
+# async def chip_id(port, log):
+
+	if action in "install_chipid_flash_bootstrap":
+		print("{}: starting (chip_id)".format(port))
+
+		log.push("reading chip_id on {}\n".format(port) )
+
+		if action == "bootstrap":
+			log.push("reading chip_id {} (RESET)\n".format(port) )
+			chip_id_args = esptool_modes["chip_id_reset"].format(port).split()
+		else:
+			log.push("reading chip_id on {}\n".format(port) )
+			chip_id_args = esptool_modes["chip_id"].format(port).split()
+		
+		print("before await outsource_function")
+		await outsource_function(chip_id_args)
+
+		print("after await outsource_function")
+		chip_id_output = output[0].decode()
+
+	# try:
+	# 	chip_id_output = subprocess.check_output(chip_id_args) 
+	# 	for line in chip_id_output.decode().split("\n"):
+	# 		log.push(line)
+	# 	log.push(" ")
 	
-	except subprocess.CalledProcessError as e:
-		log.push("Error: {}".format(e.output.decode()))
-		return
+	# except subprocess.CalledProcessError as e:
+	# 	print("Error: {}".format(e.output.decode()))
+	# 	log.push("Error: {}".format(e.output.decode()))
+	# 	return ("", "")
+		
+		mac_address = ""
+		chip_type = ""
 
-	log.push("\n\ninit complete! \n")
-	print('{}: init completed'.format(device))
+		for line in chip_id_output.split("\n"):
+			if "MAC" in line:
+				mac_colon=line.split(' ')[1]
+				mac_address = re.sub(r':', '', mac_colon)
+			if "Chip is" in line:
+				chip_type = line.split(' ')[2].lower()
+			if "Embedded PSRAM 2MB" in line:
+				chip_type += "mini"
+			if "Embedded PSRAM 8MB" in line:
+				chip_type += "dev"
+		
+		if not chip_type or not mac_address:
+			print("Error: could not determine chip_type or mac_address")
+			log.push(" ")
+			log.push("Error: could not determine chip_type or mac_address - stopping")
+			log.push("----------------------------")
+			return
+		
+		# chip_type: esp32s3mini, esp32s3dev, esp32, esps2mini
+		#log.style("font-weight: bold;")
+
+		log.push(" ")
+		log.push("chip_type: {}".format(chip_type) )
+		log.push("mac_address: {}".format(mac_address))
+		log.push("----------------------------")
+
+		print("chip_id: chip_type: {}, mac_address: {}".format(chip_type, mac_address))
+		
+		# wait for device
+		time.sleep(1)
+
+		#ls_output = subprocess.check_output("ls -al /dev/ttyACM1".split())
+		#print("devices: {}".format(ls_output.decode() ) )
+
+	# return (chip_type, mac_address)
+
+# def erase_flash(port, log):
+
+	if action in "install_erase":
+		print("{}: starting (erase_flash)".format(port))
+
+		log.push("erasing flash on {}\n".format(port) )
+		log.push(" ")
+
+		erase_args = esptool_modes["erase_flash"].format(port).split()
+
+		await outsource_function(erase_args)
+		
+		erase_flash_output = output[0].decode()
+
+		found_success = False
+		for line in erase_flash_output.split("\n"):
+			log.push(line)
+			if "success" in line:
+				log.push(" ")
+				log.push("ERASE: Success!")
+				log.push("----------------------------")
+				found_success = True
+
+		if not found_success:
+			log.push(" ")
+			log.push("Error: could not erase flash - stopping")
+			log.push("----------------------------")
+			return
+		
+		# try:
+		# 	log.push(erase_args)
+		# 	#erase_flash_output = b'simulate erase_flash Success'
+		# 	erase_flash_output = subprocess.check_output(erase_args )
+		# 	for line in erase_flash_output.decode().split("\n"):
+		# 		if "Success" in line:
+		# 			log.push(line)
+		
+		# except subprocess.CalledProcessError as e:
+		# 	log.push("Error: {}".format(e.output.decode()))
+		# 	return
+
+	# esptool.py --port /dev/ttyACM2 --chip esp32s3 --baud 460800 write_flash 0 esp32s3/ESP32_GENERIC_S3-FLASH_4M-20250415-v1.25.0.bin
+
+# def write_flash(port, chip_type, log):
+
+	if action in "install_flash":		
+		print("{}: starting (write_flash)".format(port))
+
+		log.push("writing flash on {}\n".format(port))
+		
+		flash_file = "/home/doug/ha/flash/{}/latest.bin".format(chip_type)
+		
+		flash_args = esptool_modes[chip_type].format(port, flash_file).split()
+
+		await outsource_function(flash_args)
+
+		flash_output = output[0].decode()
+
+		found_success = False
+
+		for line in flash_output.split("\n"):
+			log.push(line)
+			if "Wrote" in line:
+				log.push(" ")
+				log.push(line)
+				log.push("----------------------------")
+				found_success = True
+
+		if not found_success:
+			log.push("Error: could not write flash")
+			return
+
+		# esp_error = True
+
+		# while esp_error:
+			
+		# 	try:
+		# 		write_flash_output = b'simulate write_flash - Wrote'
+		# 		write_flash_output = subprocess.check_output(flash_args )
+				
+		# 		#log.push(flash_args )
+		# 		for line in write_flash_output.decode().split("\n"):
+		# 			if "Wrote" in line:
+		# 				log.push(line)
+		# 		#log.push(write_flash_output.decode())
+		# 		esp_error = False
+		# 	except subprocess.CalledProcessError as e:
+		# 		log.push("Error: {}".format(e.output.decode()))
+		# 		time.sleep(2)
+		# 		log.push("\nretrying")
+				
+		# log.push("flash complete\n".format(port))
+
+# def copy_bootstrap_files(port, mac_address, log):
+	print("installing bootstrap files")
+
+	if action in "install_bootstrap":
+
+		print("{}: starting rshell (copy_bootstrap_files)".format(port))
+
+		log.push(" ")
+		log.push("RSHELL: creating/copying files to {}\n".format(port) )
+		log.push(" ")
+
+		# create new config file for port
+		# or if it exists, use it (upgrading firmware, same hardware)
+
+		node_config_file = "{}{}".format(ams_path, mac_address)
+
+		if not os.path.exists(node_config_file):
+			with open(node_config_file, mode="w") as f:
+				f.write('{{ "run": "{}" }}\n'.format(mac_address) )
+
+		# create file_copy_list with mac_address config file
+		
+		with open("file_copy_list", mode="w") as f:
+			f.write('{}\n'.format(rshell_commands.format(ams_path, mac_address) ) )
+
+		rshell_args = "rshell -p /dev/{} -f file_copy_list".format(port).split()
+		#log.push(rshell_args)
+
+		await outsource_function(rshell_args)
+
+		rshell_output = output[0].decode()
+
+		for line in rshell_output.split("\n"):
+			log.push(line)
+
+
+		# try:
+		# 	#rshell_output = 'simulate rshell'
+		# 	rshell_output = subprocess.check_output(rshell_args.split())
+		# 	log.push("rshell commands completed\n")
+		# 	log.push(rshell_output)
+
+		# except subprocess.CalledProcessError as e:
+		# 	log.push("Error: {}".format(e.output.decode()))
+		# 	return
+
+		log.push(" ")
+		log.push("\n\ninit complete! \n")
+		log.push("----------------------------")
+		print('{}: init completed'.format(port))
+
+
+###########################################
+## ESPTOOL TABLE
+###########################################
+
+@ui.page('/esptool')
+def esptool_table():
+	print('esptool_table')
+
+	row_data = ["Loading ...","",""]
+
+	ui.add_body_html(style_sheet)
+
+	# Called every 3 seconds to check for changes to the table data
+	@ui.refreshable
+	def update_rows():
+
+		last_table = row_data.copy()
+		#print(last_table)
+
+		row_data.clear()
+
+		for port in pathlib.Path('/dev').glob('tty[UA][SC][BM]*'):
+			timestamp = datetime.fromtimestamp(port.stat()[7])
+			row_data.append( {"port": "/dev/" + port.name , "connect_time": timestamp.strftime("%m/%d %H:%M:%S"), "name": "waiting ..." } )
+
+		if last_table != row_data:
+			grid.update()
+
+	async def button_handler(button: ui.button):
+		action = button.text
+
+		rows = await grid.get_selected_rows()
+
+		if not rows:
+			return
+
+		for row in rows:
+
+			port = row['port'].split("/")[-1]
+
+			print("/esptool/{}?action={}".format(port, action))
+			
+			ui.navigate.to("/esptool/{}?action={}".format(port, action), new_tab=True)
+
+
+	with ui.button_group():
+		install_button = ui.button("install", on_click=lambda e: button_handler(e.sender) )
+		chipid_button = ui.button("chipid", on_click=lambda e: button_handler(e.sender) )
+		erase_button = ui.button("erase", on_click=lambda e: button_handler(e.sender) ) 	
+		flash_button = ui.button("flash", on_click=lambda e: button_handler(e.sender) ) 
+		bootstrap_button = ui.button("bootstrap", on_click=lambda e: button_handler(e.sender) )
+		reset_button = ui.button("reset", on_click=lambda e: button_handler(e.sender) )
+
+	ui.timer(3, update_rows)
+
+	column_data = [
+			{'headerName': 'Port', 'field': 'port', 'width': 50, 'checkboxSelection': True},
+			{'headerName': 'Connect time', 'field': 'connect_time', 'width': 50},
+			{'headerName': 'Name', 'field': 'name', 'width': 50}
+			]
+	
+			# {'headerName': 'Status', 'field': 'status', 'width': 80,
+			# 			'cellClassRules': {
+            # 			'bg-red-300': 'x == "offline"',
+            # 			'bg-blue-300': 'x == "shutdown"',
+			#             'bg-green-300': 'x == "online"'} },
+	
+	grid = ui.aggrid( {'columnDefs': column_data,
+		'auto_size_columns': False,
+		'rowData': row_data,
+		'rowSelection': 'multiple',
+   		} ).classes('h-[1500px]' )
+
+
+
+
+
+###########################################
+## ESPTOOL
+###########################################
 
 @ui.page('/esptool/{device}')
-async def tail_esptool(device, client: Client, action: str=""):
-	print("{}: starting thread ({})".format(device, action))
+async def esptool(device, client: Client, action: str="", chip_type: str="", mac_address: str=""):
+	print("{}: loading esptool page ({})".format(device, action))
+
+	ui.page_title(device)
+
+	with ui.button_group():
+		install_button = ui.button("install", on_click=lambda: ui.navigate.to("/esptool/{}?action=install".format(device) ) )
+		chipid_button = ui.button("chipid", on_click=lambda: ui.navigate.to("/esptool/{}?action=chipid".format(device) ) )
+		erase_button = ui.button("erase", on_click=lambda: ui.navigate.to("/esptool/{}?action=erase".format(device) ) )	
+		flash_button = ui.button("flash", on_click=lambda: ui.navigate.to("/esptool/{}?action=flash".format(device) ) )
+		bootstrap_button = ui.button("bootstrap", on_click=lambda: ui.navigate.to("/esptool/{}?action=bootstrap".format(device) ) )
+		reset_button = ui.button("reset", on_click=lambda: ui.navigate.to("/esptool/{}?action=reset".format(device) ) )
 
 	log = ui.log(max_lines=50).classes('h-screen').style('white-space: pre-wrap')
 
-	esptool_thread = threading.Thread(
-		target=flash_module, 
-		args=(device, log) ) 
+	if action:
+		await esptool_functions(device, action, log)
 
-	esptool_thread.start()
+	# reset
+
+	# if action in "reset":
+	# 	print("esptool: resetting")
+	# 	reset_result = reset_port(device, log)
+
+	# # chip_id
+
+	# if action in "install_chipid_flash_bootstrap":
+	# 	chip_type, mac_address = chip_id(device, log)
+	
+	# # erase
+		
+	# if action in "install_erase":
+
+	# 	with ui.dialog() as dialog, ui.card():
+	# 		ui.label('Erase flash?')
+	# 		with ui.row():
+	# 			ui.button('Yes', on_click=lambda: dialog.submit('Yes'))
+	# 			ui.button('No', on_click=lambda: dialog.submit('No'))
+
+	# 	result = await dialog
+
+	# 	if result == "Yes":
+	# 		print("esptool: erasing flash")
+	# 		erase_result = erase_flash(device, log)
+
+	# # flash
+			
+	# if action in "install_flash":
+
+	# 	with ui.dialog() as dialog, ui.card():
+	# 		ui.label('Write flash?')
+	# 		with ui.row():
+	# 			ui.button('Yes', on_click=lambda: dialog.submit('Yes'))
+	# 			ui.button('No', on_click=lambda: dialog.submit('No'))
+
+	# 	result = await dialog
+
+	# 	if result == "Yes":
+	# 		print("esptool: writing flash")
+	# 		write_flash_result = write_flash(device, chip_type, log)
+
+	# # bootstrap
+			
+	# if action in "install_bootstrap":
+
+	# 	# wait for user to confirm
+	# 	# for s2 chips, need to reset manually before this step
+
+	# 	with ui.dialog() as dialog, ui.card():
+	# 		ui.label('Copy bootstrapfiles? (Reboot S2 devices now!)')
+	# 		with ui.row():
+	# 			ui.button('Yes', on_click=lambda: dialog.submit('Yes'))
+	# 			ui.button('No', on_click=lambda: dialog.submit('No'))
+
+	# 	result = await dialog
+
+	# 	if result == "Yes":
+	# 		print("esptool: copying bootstrap files")
+	# 		bootstrap_result = copy_bootstrap_files(device, mac_address, log)
+
 
 	await client.disconnected()
 	print('{}: esptool page closed'.format(device))
 
 
-@ui.page('/console/{hostname}')
-async def tail_console(hostname, client: Client, action: str=""):
-	print("{}: starting console ({})".format(hostname, action))
+###########################################
+## CONSOLE
+###########################################
+
+@ui.page('/console/{action}')
+async def console_page(action, client: Client):
+	print("loading console page for {}".format(action))
+
+	await ui.context.client.connected()
+
+	print(app.storage.tab)
+
+	rows = app.storage.tab['selected_nodes']
+
+	#ui.page_title(hostname)
+
+	# setup event to signal to netrepl that user closed window
+
 	user_exit = threading.Event()
-	ui.button("Close", on_click=lambda: user_exit.set() )
-	netrepl = NetRepl(hostname, debug=False, verbose=False)
-	console_thread = threading.Thread(
-		target=netrepl.tail_console, 
-		kwargs={'user_exit': user_exit, 
-				'action': action} )
 	
-	console_thread.start()
-	log = ui.log(max_lines=50).classes('h-screen')
-	console = ReadFile(netrepl.weblog_path, log)
-	ui.timer(1, console.readline)
+	#ui.button("Close", on_click=lambda: user_exit.set() )
+
+	for row in rows:
+
+		print(row)
+		hostname = row['node']
+
+		ui.label(hostname).classes('text-3xl').classes('font-bold')
+		log = ui.log(max_lines=50).classes('h-auto')
+		#log = ui.log(max_lines=20)
+
+		# instantiate netrepl
+		netrepl = NetRepl(hostname, nicegui_log=log, user_exit=user_exit, debug=False, verbose=False)
+
+		# start console thread
+
+		console_thread = threading.Thread(
+			target=netrepl.tail_console, 
+			kwargs={'action': action} )
+		
+		console_thread.start()
+	
 	await client.disconnected()
+
+	# signal to netrepl that user closed window
 	user_exit.set()
+
 	print('{}: console page closed'.format(hostname))
 
+
+###########################################
+## MAIN TABLE
+###########################################
+
 @ui.page('/')
-def page():
+def mqtt_nodelist():
+	print('home page opened - mqtt_nodelist')
 
-	ui.add_body_html('''
-	<style>
-	.ag-theme-balham {
-		--ag-foreground-color: rgb(126, 46, 132);
-		--ag-background-color: rgb(249, 245, 227);
-		--ag-header-foreground-color: rgb(204, 245, 172);
-		--ag-header-background-color: rgb(209, 64, 129);
-		--ag-odd-row-background-color: rgb(0, 0, 0, 0.03);
-		--ag-header-column-resize-handle-color: rgb(126, 46, 132);
-
-		--ag-font-size: 20px;
-		--ag-font-family: monospace;
-	}
-	</style>
-	''')
-
+	ui.add_body_html(style_sheet)
+	# dark = ui.dark_mode()
+	# dark.enable()
 
 	# Called every 3 seconds to check for changes to the table data
 	@ui.refreshable
 	def update_rows():
+
 		last_table = row_data.copy()
 		#print(last_table)
+
 		row_data.clear()
+
 		for node in mqtt_nodes:
-			row_data.append( {"node": mqtt_nodes[node]['hostname'], "mac": mqtt_nodes[node]['mac'], "status": mqtt_nodes[node]['status'] } )
+			#print("node: {}".format(node))
+			hostname = mqtt_nodes[node].get('hostname', node)
+			build = mqtt_nodes[node].get('platform', "")
+			chip = "unknown"
+			platform = ""
+
+			if build:
+				if "ESP32S3" in build:
+					if "SPIRAM" in build:
+						chip = "S3dev"
+					else:
+						chip = "S3micro"
+				elif "ESP32S2" in build:
+					chip = "S2mini"
+				elif "ESP32" in build:
+					chip = "32dev"
+
+			total_mem = mqtt_nodes[node].get('memory', 0)
+			#print(f"{hostname}: {node} {total_mem} {chip} {build} {platform}")
+			if total_mem:
+
+				if total_mem > 1000000:
+					platform = "{}({:.0f}M) {}".format(chip, total_mem / 1000000, build)
+				else:
+					platform = "{}({:.0f}K) {}".format(chip, total_mem / 1000, build)
+
+			last_restart = mqtt_nodes[node].get('last_restart', "")
+
+			if last_restart:
+
+				input_format = "%Y/%m/%d-T%H:%M:%S"
+				target_datetime = datetime.strptime(last_restart, input_format)
+
+				now = datetime.now()
+				delta = now - target_datetime
+				days_passed = delta.days
+
+				time_str = target_datetime.strftime("%H:%M")
+
+				if days_passed == 0:
+					last_restart = "{}".format(time_str)
+				else:
+					last_restart = "{}d {}".format(days_passed, time_str)
+
+			mpy = mqtt_nodes[node].get('mpy', "")
+
+			try:
+				row_data.append( {"node": mqtt_nodes[node]['hostname'], 
+						"mac": mqtt_nodes[node]['mac'], 
+						"status": mqtt_nodes[node]['status'],
+						"server": mqtt_nodes[node]['mysecrets'],
+						"mpy": mpy,
+						"last_restart": last_restart,
+						"platform": platform
+						} )
+			except KeyError:
+				pass
 		#print(row_data)
 		
-		for device in pathlib.Path('/dev').glob('ttyACM*'):
-			row_data.append( {"node": "/dev/" + device.name , "mac": "flash", "status": "" } )
-
-		for device in pathlib.Path('/dev').glob('ttyUSB*'):
-			row_data.append( {"node": "/dev/" + device.name , "mac": "flash", "status": "" } )
+		# for device in pathlib.Path('/dev').glob('tty[UA][SC][BM]*'):
+		# 	timestamp = datetime.datetime.fromtimestamp(device.stat()[7])
+		# 	row_data.append( {"node": "/dev/" + device.name , "mac": timestamp.strftime("%m/%d %H:%M:%S"), "status": "", "server": "" } )
 
 		if last_table != row_data:
 			grid.update()
+			grid.run_grid_method('autoSizeAllColumns')
 
-	async def reboot():
-		row = await grid.get_selected_row()
-		hostname = row['node']
-		print("rebooting: ", hostname)
-		ui.navigate.to("/console/{}?reboot=yes".format(hostname), new_tab=True)
+	async def esptool_handler(button: ui.button):
+		print("esptool_handler")
 
-	async def update():
-		row = await grid.get_selected_row()
-		hostname = row['node']
-		print("updating: ", hostname)
-		ui.navigate.to("/console/{}?update=yes".format(hostname), new_tab=True)
+		ui.navigate.to("/esptool", new_tab=True)
 
+	# Called when a console related action button is clicked
+	# reboot, update, console, mqttserver
 	async def console(button: ui.button):
 		action = button.text
+		
+		await ui.context.client.connected()
+
 		rows = await grid.get_selected_rows()
+
 		if not rows:
 			return
+		
+		print(rows)
+		
+		app.storage.tab['selected_nodes'] = rows
+		print(app.storage.tab)
+
+		if action in "backup|update|reboot|console":
+			ui.navigate.to("/console/{}".format(action), new_tab=True)
+			return
+		
+
+
 		for row in rows:
-			if action in "update|reboot|console":
+
+			# if action in "update|reboot|console":
+			# 	hostname = row['node']
+			# 	# if "/dev" in hostname:
+			# 	# 	ui.notify("Invalid option for /dev devices")
+			# 	# 	return
+
+			# 	print("/console/{}".format(action))
+				
+			# 	ui.navigate.to("/console/{}".format(action), new_tab=True)
+			# 	#ui.navigate.to("/console/{}?action={}".format(hostname, action), new_tab=True)
+
+
+			# if action == "install" or action == "esptool":
+			# 	if "/dev" not in row['node']:
+			# 		ui.notify("Invalid option: /dev devices only")
+			# 		return
+				
+			# 	hostname = row['node'].split("/")[-1]
+
+			# 	print("/esptool/{}?action={}".format(hostname, action) )
+
+			# 	ui.navigate.to("/esptool/{}?action={}".format(hostname, action), new_tab=True)
+
+			if action == "shutdown" and row['status'] == "offline":
 				hostname = row['node']
-				print("opening console for: ", hostname)
-				ui.navigate.to("/console/{}?action={}".format(hostname, action), new_tab=True)
-			if action == "flash":
-				hostname = row['node'].split("/")[-1]
-				print("flashing: ", hostname)
-				ui.navigate.to("/esptool/{}?action={}".format(hostname, action), new_tab=True)
+				mac_address = row['mac']
+				mqtt_client = servers[row['server']].client
+				mqtt_client.publish("hass/sensor/esp/{}/state".format(mac_address), "shutdown")
+				ui.notify("shutdown: {} ({})".format(hostname, mac_address))
+
+			# remove mqtt config and sensor
+			# homeassistant/sensor/esp/ecfabc281b13/config
+				
+			if action == "remove" and row['status'] != "online":
+				hostname = row['node']
+				mac_address = row['mac']
+				mqtt_client = servers[row['server']].client
+				mqtt_nodes.pop(mac_address)
+				mqtt_client.publish("homeassistant/sensor/esp/{}/config".format(mac_address), "", retain=True)
+				mqtt_client.publish("hass/sensor/esp/{}/state".format(mac_address), "", retain=True)
+				mqtt_client.publish("hass/sensor/esp/{}/attrs".format(mac_address), "", retain=True)
+				
+				ui.notify("removed: {} ({})".format(hostname, mac_address))
+
+	async def shutdown():
+		rows = await grid.get_selected_rows()
+		if rows:
+			for row in rows:
+				mqtt_client = servers[row['server']].client
+				mqtt_client.publish(row['node'] + "/shutdown", "shutdown")
+
+		else:
+			ui.notify('No rows selected.')
 
 	async def output_selected_rows():
 		rows = await grid.get_selected_rows()
@@ -401,25 +758,37 @@ def page():
 		ui.button('console', on_click=lambda e: console(e.sender))
 		ui.button('update', on_click=lambda e: console(e.sender))
 		ui.button('reboot', on_click=lambda e: console(e.sender))
-		ui.button('flash', on_click=lambda e: console(e.sender))
+		ui.button('backup', on_click=lambda e: console(e.sender))
+		ui.button('shutdown', on_click=lambda e: console(e.sender))
+		ui.button('remove', on_click=lambda e: console(e.sender))
+		ui.button('esptool', on_click=lambda e: esptool_handler(e.sender) )
+		ui.button('resize', on_click=lambda e: grid.run_grid_method('autoSizeAllColumns') ) 
 
 	ui.timer(3, update_rows)
 
 	column_data = [
-			{'headerName': 'Node', 'field': 'node', 'width': 50, 'checkboxSelection': True},
-			{'headerName': 'Mac', 'field': 'mac', 'width': 50},
-			{'headerName': 'Status', 'field': 'status', 'width': 80,
-						'cellClassRules': {
-            			'bg-red-300': 'x == "offline"',
-            			'bg-blue-300': 'x == "shutdown"',
-			            'bg-green-300': 'x == "online"'} },
+			{'headerName': 'Node', 'field': 'node', 'width': 15, 'checkboxSelection': True},
+			{'headerName': 'Mac', 'field': 'mac', 'width': 15},
+			{'headerName': 'Server', 'field': 'server', 'width': 6},
+			{'headerName': 'Status', 'field': 'status', 'width': 10,
+				# 'cellClassRules': {
+				# 'bg-red-300': 'x == "offline"',
+				# 'bg-blue-300': 'x == "shutdown"',
+				# 'bg-green-300': 'x == "online"'} 
+				},
+			{'headerName': 'mpy', 'field': 'mpy', 'width': 8},
+			{'headerName': 'Last restart', 'field': 'last_restart', 'width': 20},
+			{'headerName': 'platform', 'field': 'platform', 'width': 15},
 		]
 	
 	grid = ui.aggrid( {'columnDefs': column_data,
-		'auto_size_columns': False,
+		'autoSizeStrategy': 'fitCellContents',
 		'rowData': row_data,
 		'rowSelection': 'multiple',
-   		} ).classes('h-[1500px]' )
+	} ).classes('h-[1500px]' )
+
+	#print(grid.options)
+
 
 	ui.button('refresh', on_click=output_selected_row)
 
@@ -434,9 +803,51 @@ def page():
 	grid.on('cellClicked', handle_cell_click)
 
 
-ui.run()
+@ui.page('/test')
+async def test(client: Client):
+	print('preparing')
+	await client.connected()
+	print('connected')
 
-files = []
-import pathlib
-a=pathlib.Path("/dev")
-files = [f for f in a.glob("ttyA*") if f.is_file()]
+	log = ui.log(max_lines=500).classes('h-screen')
+	log.push("Logging started ...")
+
+	with ui.dialog() as dialog, ui.card():
+		ui.label('Are you sure?')
+		with ui.row():
+			ui.button('Yes', on_click=lambda: dialog.submit('Yes'))
+			ui.button('No', on_click=lambda: dialog.submit('No'))
+
+	result = await dialog
+	log.push(f'You chose {result}')
+
+	#print("tabs: {}\n".format(app.storage.tab))
+	#print("client: {}\n".format(app.storage.client))
+	#print("user: {}\n".format(app.storage.user))
+	#print("general: {}\n".format(app.storage.general))
+	#print("browser: {}\n".format(app.storage.browser))
+	await client.disconnected()
+	print('disconnected')
+
+
+"""
+(ha) doug@uberdell:~/ha$ esptool.py --port /dev/ttyACM2 chip_id
+esptool.py v4.8.1
+Serial port /dev/ttyACM2
+Connecting...
+Detecting chip type... ESP32-S3
+Chip is ESP32-S3 (QFN56) (revision v0.2)
+Features: WiFi, BLE, Embedded Flash 4MB (XMC), Embedded PSRAM 2MB (AP_3v3)
+Crystal is 40MHz
+MAC: cc:ba:97:1d:37:f4
+Uploading stub...
+Running stub...
+Stub running...
+Warning: ESP32-S3 has no Chip ID. Reading MAC instead.
+MAC: cc:ba:97:1d:37:f4
+Hard resetting via RTS pin...
+"""
+
+
+if __name__ in {"__main__", "__mp_main__"}:
+	ui.run()

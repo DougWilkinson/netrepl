@@ -396,30 +396,15 @@ def main(hostname):
 
 	while command or reboot:
 
-		# attempts = 2
-		# while attempts > 0:
-
-		# 	# timeout low for sending commands/netreply
-		# 	if not netrepl.connect(timeout=20):
-		# 		break
-			
-		# 	try:
-		# 		# stop if we can't break repl
-		# 		netrepl.send_break(xtra_breaks)
-				
-		# 		# stop if setup fails for any reason other than memory
-		# 		if not setup(netrepl):
-		# 			break
-				
-		# 		attempts = 0
-
-		# 	except MemoryError:
-		# 		netrepl.logprint("low memory failure - attempting reboot")
-		# 		reboot_node(netrepl)
-		# 		attempts -= 1
-		# 		if attempts == 0:
-		# 			netrepl.logprint("low memory recovery failed - stopping")
+		# timeout low for sending commands/netreply
+		if not netrepl.connect(timeout=20):
+			break
 		
+		netrepl.send_break(xtra_breaks)
+			
+		if not netrepl.setup():
+			break
+				
 		# # change name if syncing and macfile name is valid and not same 
 		# if command == "sync" and netrepl.macfile_hostname != {} and netrepl.macfile_hostname != "unknown" and netrepl.macfile_hostname != hostname:
 		# 	print("Warning! Device: {} will be renamed to {}".format(hostname, netrepl.macfile_hostname))
@@ -445,7 +430,8 @@ def main(hostname):
 			# netrepl.put_files()
 
 		if command == "put":
-			put_files(netrepl, args)
+			print("args: ", args)
+			netrepl.put_files(args)
 
 		if command == "remove":
 			netrepl.remove_file(args[0])

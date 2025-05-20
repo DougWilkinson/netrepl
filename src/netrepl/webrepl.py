@@ -39,12 +39,17 @@ class websocket:
 
 	def recvexactly(self, sz, user_exit=None):
 		res = b""
+		timeout_count = 0
 		while sz:
 			#print("recvexactly: in while loop: user_exit:", user_exit)
 			try:
 				data = self.s.recv(sz)
 			except socket.timeout:
-				#print("device timeout during websocket read: user_exit:", user_exit)
+				timeout_count += 1
+				print("recvexactly: socket.timeout:", timeout_count)
+				if timeout_count > 2:
+					return b'LONG_TIMEOUT'
+				#print("recvexactly: socket.timeout:", user_exit)
 				if user_exit is not None:
 					#print("user_exit: ", user_exit)
 					if user_exit.is_set():
@@ -67,10 +72,14 @@ class websocket:
 			while True:
 				#print("in read loop")
 				hdr = self.recvexactly(2, user_exit)
+				if hdr == b'LONG_TIMEOUT':
+					return hdr
 				assert len(hdr) == 2
 				fl, sz = struct.unpack(">BB", hdr)
 				if sz == 126:
 					hdr = self.recvexactly(2, user_exit)
+					if hdr == b'LONG_TIMEOUT':
+						return hdr
 					assert len(hdr) == 2
 					(sz,) = struct.unpack(">H", hdr)
 				if fl == 0x82:
@@ -84,6 +93,10 @@ class websocket:
 					self.debugmsg("[i] Skip data: %s" % skip)
 					sz -= len(skip)
 			data = self.recvexactly(sz, user_exit)
+
+			if data == b'LONG_TIMEOUT':
+				return data
+
 			assert len(data) == sz
 			self.buf = data
 
