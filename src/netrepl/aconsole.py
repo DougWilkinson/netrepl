@@ -64,7 +64,7 @@ style_sheet = '''
 rshell_commands = """cd {}
 cp {} /pyboard
 cp boot.py /pyboard
-cp esp*.py /pyboard
+cp blinkled.py /pyboard
 cp main.py /pyboard
 cp hass.py /pyboard
 cp msgqueue.py /pyboard
@@ -541,9 +541,10 @@ async def console_page(action, client: Client):
 
 		print(row)
 		hostname = row['node']
+		mac_address = row['mac']
 
-		ui.label(hostname).classes('text-3xl').classes('font-bold')
-		log = ui.log(max_lines=50).classes('h-auto')
+		ui.label(hostname).classes('text-4xl').classes('font-bold')
+		log = ui.log(max_lines=50).classes('h-auto').classes('text-2xl').classes('monospace')
 		#log = ui.log(max_lines=20)
 
 		# instantiate netrepl
@@ -553,7 +554,7 @@ async def console_page(action, client: Client):
 
 		console_thread = threading.Thread(
 			target=netrepl.tail_console, 
-			kwargs={'action': action} )
+			kwargs={'action': action, 'mac_address': mac_address} )
 		
 		console_thread.start()
 	
@@ -596,22 +597,22 @@ def mqtt_nodelist():
 			if build:
 				if "ESP32S3" in build:
 					if "SPIRAM" in build:
-						chip = "S3dev"
+						platform = "3d"
 					else:
-						chip = "S3micro"
+						platform = "3m"
 				elif "ESP32S2" in build:
-					chip = "S2mini"
+					platform = "2m"
 				elif "ESP32" in build:
-					chip = "32dev"
+					platform = "32"
 
-			total_mem = mqtt_nodes[node].get('memory', 0)
+			# total_mem = mqtt_nodes[node].get('memory', 0)
 			#print(f"{hostname}: {node} {total_mem} {chip} {build} {platform}")
-			if total_mem:
+			# if total_mem:
 
-				if total_mem > 1000000:
-					platform = "{}({:.0f}M) {}".format(chip, total_mem / 1000000, build)
-				else:
-					platform = "{}({:.0f}K) {}".format(chip, total_mem / 1000, build)
+			# 	if total_mem > 1000000:
+			# 		platform = "{}({:.0f}M) {}".format(chip, total_mem / 1000000, build)
+			# 	else:
+			# 		platform = "{}({:.0f}K) {}".format(chip, total_mem / 1000, build)
 
 			last_restart = mqtt_nodes[node].get('last_restart', "")
 
@@ -623,15 +624,16 @@ def mqtt_nodelist():
 				now = datetime.now()
 				delta = now - target_datetime
 				days_passed = delta.days
+				hours_passed = delta.seconds // 3600
 
 				time_str = target_datetime.strftime("%H:%M")
 
-				if days_passed == 0:
-					last_restart = "{}".format(time_str)
-				else:
-					last_restart = "{}d {}".format(days_passed, time_str)
+				uptime = "{}d".format(days_passed)
 
-			mpy = mqtt_nodes[node].get('mpy', "")
+			mpy = mqtt_nodes[node].get('mpy', "?.??.0")[0:4]
+
+			signal = mqtt_nodes[node].get('signal', 0)
+			reboots = mqtt_nodes[node].get('reboots', 0)
 
 			try:
 				row_data.append( {"node": mqtt_nodes[node]['hostname'], 
@@ -639,7 +641,9 @@ def mqtt_nodelist():
 						"status": mqtt_nodes[node]['status'],
 						"server": mqtt_nodes[node]['mysecrets'],
 						"mpy": mpy,
-						"last_restart": last_restart,
+						"signal": signal,
+						"reboots": reboots,
+						"uptime": uptime,
 						"platform": platform
 						} )
 			except KeyError:
@@ -768,17 +772,19 @@ def mqtt_nodelist():
 
 	column_data = [
 			{'headerName': 'Node', 'field': 'node', 'width': 15, 'checkboxSelection': True},
-			{'headerName': 'Mac', 'field': 'mac', 'width': 15},
-			{'headerName': 'Server', 'field': 'server', 'width': 6},
 			{'headerName': 'Status', 'field': 'status', 'width': 10,
 				# 'cellClassRules': {
 				# 'bg-red-300': 'x == "offline"',
 				# 'bg-blue-300': 'x == "shutdown"',
 				# 'bg-green-300': 'x == "online"'} 
 				},
-			{'headerName': 'mpy', 'field': 'mpy', 'width': 8},
-			{'headerName': 'Last restart', 'field': 'last_restart', 'width': 20},
+			{'headerName': 'uptime', 'field': 'uptime', 'width': 4},
+			{'headerName': 'db', 'field': 'signal', 'width': 4},
+			{'headerName': 'RBs', 'field': 'reboots', 'width': 3},
 			{'headerName': 'platform', 'field': 'platform', 'width': 15},
+			{'headerName': 'Mac', 'field': 'mac', 'width': 15},
+			{'headerName': 'Server', 'field': 'server', 'width': 6},
+			{'headerName': 'mpy', 'field': 'mpy', 'width': 8},
 		]
 	
 	grid = ui.aggrid( {'columnDefs': column_data,
@@ -809,17 +815,23 @@ async def test(client: Client):
 	await client.connected()
 	print('connected')
 
-	log = ui.log(max_lines=500).classes('h-screen')
-	log.push("Logging started ...")
+	log = ui.log(max_lines=5).classes('text-lg').classes('monospace')
+	log.push("xl monospace")
+	log = ui.log(max_lines=5).classes('text-1xl').classes('monospace')
+	log.push("1xl monospace")
+	log = ui.log(max_lines=5).classes('text-2xl').classes('monospace')
+	log.push("2xl monospace")
+	log = ui.log(max_lines=5).classes('text-3xl').classes('monospace')
+	log.push("3xl monospace")
 
-	with ui.dialog() as dialog, ui.card():
-		ui.label('Are you sure?')
-		with ui.row():
-			ui.button('Yes', on_click=lambda: dialog.submit('Yes'))
-			ui.button('No', on_click=lambda: dialog.submit('No'))
+	# with ui.dialog() as dialog, ui.card():
+	# 	ui.label('Are you sure?')
+	# 	with ui.row():
+	# 		ui.button('Yes', on_click=lambda: dialog.submit('Yes'))
+	# 		ui.button('No', on_click=lambda: dialog.submit('No'))
 
-	result = await dialog
-	log.push(f'You chose {result}')
+	# result = await dialog
+	# log.push(f'You chose {result}')
 
 	#print("tabs: {}\n".format(app.storage.tab))
 	#print("client: {}\n".format(app.storage.client))

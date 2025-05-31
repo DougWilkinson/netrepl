@@ -54,13 +54,26 @@ def genhash(file):
 			buf = handle.read(100)	
 	return binascii.hexlify(file_hash.digest() ).decode('UTF-8')
 """
-
+genhash_function = """
+import hashlib, binascii
+def genhash(file):
+	file_hash = hashlib.sha256()
+	try:
+		with open(file, "rb") as handle:
+			buf = handle.read(100)
+			while buf:
+				file_hash.update(buf)
+				buf = handle.read(100)	
+		return binascii.hexlify(file_hash.digest() ).decode('UTF-8')
+	except:
+		return ('ENOENT')
+"""
 # replaced below with exec()
 def genhash():
 	pass
 
 # define this for use on this end
-exec (genhash_func)
+exec (genhash_function)
 
 MPY_EXLCUDES = ("boot.py", 
 				"natives.py",
@@ -89,6 +102,7 @@ skip = ("#",
 		"machine", 
 		"math",
 		#"microdot",
+		"micropython",
 		"neopixel", 
 		"network", 
 		"ntptime", 
@@ -219,7 +233,7 @@ class NetRepl:
 		for attempt in range(5):
 			try:
 				start_time = time()
-				self.logprint("connecting (timeout={}), try={}".format(timeout, attempt))
+				print("connecting (timeout={}), try={}".format(timeout, attempt))
 				self.session = Webrepl(**{'host':self.hostname, 
 						'password': self.password,
 						'timeout':timeout,
@@ -227,7 +241,7 @@ class NetRepl:
 						'verbose': self.verbose})
 				if self.session.connected:
 					self.connected = True
-					self.logprint("connected!" )
+					self.logprint("Connected!" )
 					return True
 			except KeyboardInterrupt:
 				self.logprint("ctrl-C during connect" )
@@ -271,13 +285,13 @@ class NetRepl:
 			raise ImportError
 		return result
 
-	def tail_console(self, timeout=30, action="") -> bool:
+	def tail_console(self, mac_address="", timeout=30, action="") -> bool:
 
 		if action == "reboot":
 			self.reboot_node()
 		
 		if action == "update":
-			if not self.update():
+			if not self.update(mac_address):
 				return False
 
 		if action == "backup":
@@ -338,7 +352,7 @@ class NetRepl:
 			self.send_command(chr(3))
 			sleep(.2)
 
-		self.logprint("break sent ...")
+		print("break sent ...")
 		
 		return True
 	
@@ -393,18 +407,42 @@ class NetRepl:
 		except:
 			self.logprint("Error getting remote filelist!")
 		return []
-		
+
+
+	# Check that local file exists and mpy version exists if applicable
+	def confirm_files(self, source_files, use_mpy=False) -> bool:
+
+		for source_name in source_files:
+			
+			name_no_ext = source_name.split(".")[0]
+
+			print("confirm_files: file: {}".format(name_no_ext) )
+
+			if ".py" in source_name and use_mpy:
+				# generate .mpy and make this the source file
+				#print("using .mpy for {}".format(source_name))
+				if not self.make_mpy(source_name):
+					self.logprint("mpy-cross failed for: {} in {}".format(source_name, source_files[source_name]) )
+					return False
+
+			else:
+
+				if not self.local_stat(File(self.ams_path / source_name) ):
+					self.logprint("confirm_files: source file {} from {} not found".format(source_name, source_files[source_name]) )
+					return False
+			
+			print("file: {} - OK".format(name_no_ext) )
+
+		return True
+
 	def put_file(self, source_name, dryrun=True, use_mpy=False, force=False) -> File:
 		error_copying = File("error_copying", exists=False)
 		error_hashfile = File("error_hashfile", exists=False)
 
-		if "/" in source_name:
-			only_name = source_name.split("/")[-1:][0]
-		else:
-			only_name = source_name
-		
-		name_no_ext = only_name.split(".")[0]
+		name_no_ext = source_name.split(".")[0]
+
 		print("put_file: {}".format(name_no_ext) )
+
 		if ".py" in source_name and use_mpy:
 			# generate .mpy and make this the source file
 			#print("using .mpy for {}".format(source_name))
@@ -413,13 +451,10 @@ class NetRepl:
 		else:
 			# Use original file name as source
 			#print("using {}".format(source_name))
-			if "/" in source_name:
-				source_file = File(source_name)
-			else:
-				source_file = File(self.ams_path / source_name)
+			source_file = File(self.ams_path / source_name)
 			#print("source name:", source_name)
 			#print("dest_name", dest_name)
-			dest_file = File(only_name)
+			dest_file = File(source_name)
 		
 		missing_source = File("missing_source", exists=False)
 		if not self.local_stat(source_file):
@@ -446,7 +481,8 @@ class NetRepl:
 			else:
 				self.session.put_file(source_file.path, dest_file.path )
 				new_hash = self.remote_hash(dest_file.path)
-
+				print("new hash: ", new_hash)
+				print("source_file hash: ", source_file.hash)
 				if new_hash != source_file.hash:
 					# print("local: ", remote_file.path, remote_file.size)
 					# Stop here if copy fails
@@ -545,7 +581,7 @@ class NetRepl:
 		try:
 
 			result = self.send_command('reboot(3)')
-			self.logprint(result)
+			print(result)
 
 			if b'REBOOTING' in result:
 
@@ -579,7 +615,7 @@ class NetRepl:
 		error_hashfile = File("error_hashfile", exists=False)
 		#print("remote_hash({})".format(filename) )
 		hash = self.send_command('genhash("{}")'.format(filename) )
-		#print("hash: ", hash)
+		print("hash: ", hash)
 		if hash and b'ENOENT' in hash:
 			return "FileNotFoundError"
 		
@@ -625,7 +661,7 @@ class NetRepl:
 			return {}
 
 	def setup(self) -> bool:
-		self.logprint("setting up REPL")
+		print("setup: Connecting to: {}".format(self.hostname) )
 
 		if not self.connect():
 			return False
@@ -654,11 +690,11 @@ class NetRepl:
 		self.remote_name = self.getvar('hostname')
 		
 		# look for mac address on device
-		self.logprint("setup: importing stuff")
+		print("setup: genhash definition")
 		try:
 			self.send_command('from network import WLAN' )
-			self.send_command('from ubinascii import hexlify' )
-			self.send_command('import uos')
+			self.send_command('from binascii import hexlify' )
+			self.send_command('import os')
 		except ImportError:
 			self.logprint("setup: FATAL - import failed - stopping")
 			return False
@@ -680,12 +716,10 @@ class NetRepl:
 			self.logprint("setup: FATAL - corrupt mac file or not found - stopping")
 			return False
 
-		# make sure we have uos
-		self.logprint("setup: checking for uos")
-		
 		# If NameError, hash function not imported on device, load and try again
-		self.logprint("setup: sending genhash")
-		self.exec_remote_list(genhash_func.split("\n"))
+		
+		print("setup: sending genhash")
+		self.exec_remote_list(genhash_function.split("\n"))
 
 		hash = self.send_command('genhash("{}")'.format('boot.py') )
 
@@ -693,84 +727,172 @@ class NetRepl:
 			self.logprint("setup: FATAL genhash failed - stopping")
 			return False
 			
-		self.logprint("setup: success!")
+		print("setup: success!")
 		return True
-		
 
-	def find_imports(self, filename) -> list:
-			filename = filename.lower()
-			self.logger.debug("looking for imports in: {}".format(filename))
-			found = [filename]
-			file_path = pathlib.Path(self.ams_path / filename )
+
+
+	def find_imports(self, filename) -> dict:
+		found = {filename: filename}
+		stack = [filename]  # Stack of files to process
+
+		while stack:
+			current_filename = stack.pop()
+			print(f"Looking for imports in: {current_filename}")
+			file_path = pathlib.Path(self.ams_path / current_filename)
+
 			try:
 				with open(file_path) as file:
-					line = True
-					while line:
-						line = file.readline().lower()
-						#debug and print("checking: {}".format(line))
-						items = line.strip().split(" ")
-						if "#fakeimport" in line:
-							found.append(items[1])
+					for line in file:
+						items = line.strip().split()
+
+						# Handle #fakeimport
+						if "#fakeimport" in line and len(items) > 1:
+							found[items[1]] = current_filename
 							continue
-						if len(items) > 1 and filename.split(".")[0] == items[1]:
-							self.logger.debug("filename=import: {}".format(line))
+
+						# Ignore imports of the same file
+						if len(items) > 1 and current_filename.split(".")[0] == items[1]:
+							print(f"filename=import: {line.strip()}")
 							continue
-						if  len(items) > 3 and filename.split(".")[0] == items[3]:
-							self.logger.debug("filename=import: {}".format(line))
+						if len(items) > 3 and current_filename.split(".")[0] == items[3]:
+							print(f"filename=import: {line.strip()}")
 							continue
+
+						# Process actual imports
 						if "import" in line or "from " in line:
-							self.logger.debug("{}: import or from: {}".format(filename, line))
-							if (items[1] not in skip and "#" not in items[0]):
-								if items[0] == "from" or items[0] == "import":
+							print(f"{current_filename}: import or from: {items}")
+							if len(items) > 1 and items[1] not in skip and "#" not in items[0]:
+								print(f"item1 {items[1]} and item0 {items[0]} not in skip or comment")
+								if items[0] in ("from", "import"):
 									nextfile = items[1] + ".py"
-									#print("looking at: ", nextfile)
-									found += self.find_imports(nextfile)
+									if nextfile not in found:  # Prevent duplicates
+										print("looking at nextfile:", nextfile)
+										stack.append(nextfile)
+										found[nextfile] = current_filename
 			except FileNotFoundError:
-				pass
-			#print("find_imports: found:", found)
-			return found
+				continue
 
-	def put_files(self, files, dryrun=False, force=False, mpy_ok=True):
-		all_files = []
+		print("find_imports: found:", found)
+		return found
+
+
+
+	# def find_imports(self, filename) -> dict:
+			
+	# 		found = {}
+	# 		self.logger.debug("looking for imports in: {}".format(filename))
+	# 		#found[filename] = filename
+
+	# 		file_path = pathlib.Path(self.ams_path / filename )
+			
+	# 		try:
+	# 			with open(file_path) as file:
+	# 				line = True
+	# 				while line:
+						
+	# 					line = file.readline()
+
+	# 					#debug and print("checking: {}".format(line))
+	# 					items = line.strip().split(" ")
+						
+	# 					# add files not imported but needed in some other form
+	# 					if "#fakeimport" in line:
+	# 						found[items[1]] = filename
+	# 						continue
+						
+	# 					# ignore imports of the same file
+	# 					if len(items) > 1 and filename.split(".")[0] == items[1]:
+	# 						self.logger.debug("filename=import: {}".format(line))
+	# 						continue
+
+	# 					# ignore imports of the same file
+	# 					if  len(items) > 3 and filename.split(".")[0] == items[3]:
+	# 						self.logger.debug("filename=import: {}".format(line))
+	# 						continue
+						
+	# 					if "import" in line or "from " in line:
+	# 						print("{}: import or from: {}".format(filename, items))
+	# 						if (items[1] not in skip and "#" not in items[0]):
+	# 							print("item1 {} and item0 {} not in skip or comment".format(items[1], items[0]) )
+	# 							if items[0] == "from" or items[0] == "import":
+	# 								nextfile = items[1] + ".py"
+	# 								print("looking at nextfile: ", nextfile)
+	# 								found.update(self.find_imports(nextfile) )
+	# 		except FileNotFoundError:
+	# 			pass
+	# 		#found_deduplicated = set(found)
+	# 		print("find_imports: found:", found)
+	# 		return found
+
+	def get_files(self, seed) -> dict:
+		all_files = {}
 		
-		if len(files) > 0:
-			for src in files:
-				all_files += self.find_imports(src)
+		if len(seed) > 0:
+			for file in seed:
+				print("get_files: file: {}".format(file))
+				all_files.update( self.find_imports(file) )
 
-			#print("put_files: all_files:", all_files)
-			all_files_success = True
-			for imported_file in set(all_files):
+			print("get_files: all_files:", all_files)
 
-				if 'mysecrets' in imported_file:
-					self.logprint("skip   : mysecrets already exists")
-					continue
-				
-				mpy_ok = imported_file not in MPY_EXLCUDES and ".py" in imported_file
-
-				if not self.put_file(imported_file, dryrun=dryrun, 
-					use_mpy=mpy_ok, force=force):
-
-					all_files_success = False
-
-			return all_files_success
-				
 		else:
-			self.logprint("No files specified to put!")
+			print("No files specified to get!")
+		
+		return all_files
+		
+	def put_files(self, files, dryrun=False, force=False, mpy_ok=True):
+
+		for file in set(files):
+
+			if 'mysecrets' in file:
+				self.logprint("skip   : mysecrets already exists")
+				continue
+			
+			mpy_ok = file not in MPY_EXLCUDES and ".py" in file
+
+			if not self.put_file(file, dryrun=dryrun, use_mpy=mpy_ok, force=force):
+				return False
+
+		return True
+
+	def update(self, mac_address):
+		self.logprint("update: checking source files")
+
+		self.remote_mac = mac_address
+
+		if not os.stat( self.ams_path / mac_address ):
+			self.logprint("update: FATAL - no MAC file - stopping")
 			return False
 
-	def update(self):
-		self.logprint("starting update ...")
+		macfile_hostname = self.load_config()
+
+		if not macfile_hostname:
+			self.logprint("update: FATAL - MAC file missing hostname - stopping")
+			return False
+
+		hostname_filename = self.ams_path / (macfile_hostname + ".py")
+
+		try:
+			self.logprint(self.ams_path / hostname_filename)
+			r = os.stat( self.ams_path / hostname_filename )
+				
+		except FileNotFoundError:
+			self.logprint("update: FATAL - no hostname or MAC files - stopping")
+			return False
+
+		args = ["boot.py", "main.py", hostname_filename.name, self.remote_mac]
+		imported_files = self.get_files(args)
+
+		if not self.confirm_files(imported_files):
+			self.logprint("update: check for missing files or mpy compiler issues - stopping update")
+			return False
+
+		self.logprint("update: starting update")
 
 		if not self.setup():
 			return False
-				
-		args = ["boot.py", "main.py", "{}.py".format(self.macfile_hostname), self.remote_mac]
-		
-		self.logprint("starting sync ...".format(self.hostname))
-		
-		result = self.put_files(args)
-		
-		if result:
+
+		if self.put_files(imported_files):
 			self.reboot_node()
 			return True
 
