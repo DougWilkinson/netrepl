@@ -62,7 +62,7 @@ style_sheet = '''
 	'''
 
 rshell_commands = """cd {}
-cp {} /pyboard
+cp {}.boot /pyboard/{}
 cp boot.py /pyboard
 cp blinkled.py /pyboard
 cp main.py /pyboard
@@ -72,7 +72,6 @@ cp device.py /pyboard
 cp webrepl_cfg.py /pyboard
 cp core.py /pyboard
 cp flag.py /pyboard
-cp newsensor.py /pyboard
 cp versions.py /pyboard
 cp hassdocker/mysecrets.py /pyboard
 repl ~ import machine ~ machine.reset() ~
@@ -90,13 +89,22 @@ output = []
 def call_check_output(command, thread_done):
 	global output
 
-	output.insert(0, (subprocess.check_output(command) ) )
+	for i in range(3):
+		try:
+			output.insert(0, (subprocess.check_output(command) ) )
+			break
+		except subprocess.CalledProcessError as e:
+			print("retry: {}: ".format(i+1), command)
+			output.insert(0, "error" )
+
 	thread_done.set()
 
 async def outsource_function(command):
 	global output
 	thread_done = asyncio.Event()
 
+	print("outsource_function: command: {}".format(command))
+	
 	process = threading.Thread(target=call_check_output, args=(command, thread_done))
 	process.start()
 
@@ -120,49 +128,32 @@ async def esptool_functions(port, action, log):
 		print("after await outsource_function")
 		result = output[0].decode()
 
-		for line in result.split("\n"):
-			log.push(line)
+		# for line in result.split("\n"):
+		# 	log.push(line)
 
-		# try:
-		# 	subprocess.check_output(reset_args) 
-		# 	log.push(" ")
-		# 	log.push("port reset\n")
-
-		# except subprocess.CalledProcessError as e:
-		# 	print("Error: {}".format(e.output.decode()))
-		# 	log.push("Error: {}".format(e.output.decode()))
-
-
-# async def chip_id(port, log):
+		if result == "error":
+			log.push("error resetting port on {}\n".format(port) )
+			return
+		
+		time.sleep(2)
 
 	if action in "install_chipid_flash_bootstrap":
 		print("{}: starting (chip_id)".format(port))
 
-		log.push("reading chip_id on {}\n".format(port) )
-
-		if action == "bootstrap":
-			log.push("reading chip_id {} (RESET)\n".format(port) )
-			chip_id_args = esptool_modes["chip_id_reset"].format(port).split()
-		else:
-			log.push("reading chip_id on {}\n".format(port) )
-			chip_id_args = esptool_modes["chip_id"].format(port).split()
+		# if action == "bootstrap":
+		# 	log.push("reading chip_id {} (RESET)\n".format(port) )
+		# 	chip_id_args = esptool_modes["chip_id_reset"].format(port).split()
+		# else:
+		# log.push("reading chip_id on {}\n".format(port) )
+		chip_id_args = esptool_modes["chip_id_reset"].format(port).split()
 		
-		print("before await outsource_function")
 		await outsource_function(chip_id_args)
 
-		print("after await outsource_function")
 		chip_id_output = output[0].decode()
 
-	# try:
-	# 	chip_id_output = subprocess.check_output(chip_id_args) 
-	# 	for line in chip_id_output.decode().split("\n"):
-	# 		log.push(line)
-	# 	log.push(" ")
-	
-	# except subprocess.CalledProcessError as e:
-	# 	print("Error: {}".format(e.output.decode()))
-	# 	log.push("Error: {}".format(e.output.decode()))
-	# 	return ("", "")
+		if chip_id_output == "error":
+			log.push("error reading chip_id on: {}\n".format(port) )
+			return
 		
 		mac_address = ""
 		chip_type = ""
@@ -196,14 +187,7 @@ async def esptool_functions(port, action, log):
 		print("chip_id: chip_type: {}, mac_address: {}".format(chip_type, mac_address))
 		
 		# wait for device
-		time.sleep(1)
-
-		#ls_output = subprocess.check_output("ls -al /dev/ttyACM1".split())
-		#print("devices: {}".format(ls_output.decode() ) )
-
-	# return (chip_type, mac_address)
-
-# def erase_flash(port, log):
+		time.sleep(2)
 
 	if action in "install_erase":
 		print("{}: starting (erase_flash)".format(port))
@@ -217,36 +201,27 @@ async def esptool_functions(port, action, log):
 		
 		erase_flash_output = output[0].decode()
 
-		found_success = False
-		for line in erase_flash_output.split("\n"):
-			log.push(line)
-			if "success" in line:
-				log.push(" ")
-				log.push("ERASE: Success!")
-				log.push("----------------------------")
-				found_success = True
-
-		if not found_success:
-			log.push(" ")
-			log.push("Error: could not erase flash - stopping")
-			log.push("----------------------------")
+		if erase_flash_output == "error":
+			log.push("error flashing to port: {}\n".format(port) )
 			return
 		
-		# try:
-		# 	log.push(erase_args)
-		# 	#erase_flash_output = b'simulate erase_flash Success'
-		# 	erase_flash_output = subprocess.check_output(erase_args )
-		# 	for line in erase_flash_output.decode().split("\n"):
-		# 		if "Success" in line:
-		# 			log.push(line)
-		
-		# except subprocess.CalledProcessError as e:
-		# 	log.push("Error: {}".format(e.output.decode()))
+		# found_success = False
+		# for line in erase_flash_output.split("\n"):
+		# 	log.push(line)
+		# 	if "success" in line:
+		# 		log.push(" ")
+
+		log.push("ERASE: Success!")
+				# log.push("----------------------------")
+				# found_success = True
+
+		# if not found_success:
+		# 	log.push(" ")
+		# 	log.push("Error: could not erase flash - stopping")
+		# 	log.push("----------------------------")
 		# 	return
-
-	# esptool.py --port /dev/ttyACM2 --chip esp32s3 --baud 460800 write_flash 0 esp32s3/ESP32_GENERIC_S3-FLASH_4M-20250415-v1.25.0.bin
-
-# def write_flash(port, chip_type, log):
+		
+	time.sleep(2)
 
 	if action in "install_flash":		
 		print("{}: starting (write_flash)".format(port))
@@ -261,43 +236,27 @@ async def esptool_functions(port, action, log):
 
 		flash_output = output[0].decode()
 
-		found_success = False
-
-		for line in flash_output.split("\n"):
-			log.push(line)
-			if "Wrote" in line:
-				log.push(" ")
-				log.push(line)
-				log.push("----------------------------")
-				found_success = True
-
-		if not found_success:
-			log.push("Error: could not write flash")
+		if flash_output == "error":
+			log.push("error resetting port on {}\n".format(port) )
 			return
+		
+		log.push("FLASH: Success!")
 
-		# esp_error = True
+		# found_success = False
 
-		# while esp_error:
-			
-		# 	try:
-		# 		write_flash_output = b'simulate write_flash - Wrote'
-		# 		write_flash_output = subprocess.check_output(flash_args )
-				
-		# 		#log.push(flash_args )
-		# 		for line in write_flash_output.decode().split("\n"):
-		# 			if "Wrote" in line:
-		# 				log.push(line)
-		# 		#log.push(write_flash_output.decode())
-		# 		esp_error = False
-		# 	except subprocess.CalledProcessError as e:
-		# 		log.push("Error: {}".format(e.output.decode()))
-		# 		time.sleep(2)
-		# 		log.push("\nretrying")
-				
-		# log.push("flash complete\n".format(port))
+		# for line in flash_output.split("\n"):
+		# 	log.push(line)
+		# 	if "Wrote" in line:
+		# 		log.push(" ")
+		# 		log.push(line)
+		# 		log.push("----------------------------")
+		# 		found_success = True
 
-# def copy_bootstrap_files(port, mac_address, log):
-	print("installing bootstrap files")
+		# if not found_success:
+		# 	log.push("Error: could not write flash")
+		# 	return
+
+	time.sleep(2)
 
 	if action in "install_bootstrap":
 
@@ -305,21 +264,19 @@ async def esptool_functions(port, action, log):
 
 		log.push(" ")
 		log.push("RSHELL: creating/copying files to {}\n".format(port) )
-		log.push(" ")
 
-		# create new config file for port
-		# or if it exists, use it (upgrading firmware, same hardware)
+		# create mac.boot file instead of existing mac config file
+		# will boot with mac as hostname and shows up in browser
 
-		node_config_file = "{}{}".format(ams_path, mac_address)
+		with open(ams_path + "{}.boot".format(mac_address), mode="w") as f:
+			f.write('{{ "run": "{}" }}\n'.format(mac_address) )
 
-		if not os.path.exists(node_config_file):
-			with open(node_config_file, mode="w") as f:
-				f.write('{{ "run": "{}" }}\n'.format(mac_address) )
-
-		# create file_copy_list with mac_address config file
-		
 		with open("file_copy_list", mode="w") as f:
-			f.write('{}\n'.format(rshell_commands.format(ams_path, mac_address) ) )
+			f.write('{}\n'.format(rshell_commands.format(ams_path, mac_address, mac_address) ) )
+
+		# await outsource_function("ls -al /dev/ttyACM*".split() )
+		# print(output[0].decode())
+		#print(os.listdir("/dev/"))
 
 		rshell_args = "rshell -p /dev/{} -f file_copy_list".format(port).split()
 		#log.push(rshell_args)
@@ -328,9 +285,15 @@ async def esptool_functions(port, action, log):
 
 		rshell_output = output[0].decode()
 
-		for line in rshell_output.split("\n"):
-			log.push(line)
+		if rshell_output == "error":
+			log.push("error resetting port on {}\n".format(port) )
+			return
+		
+		# for line in rshell_output.split("\n"):
+		# 	log.push(line)
 
+		# # cleanup tmp files
+		# os.remove("{}{}.boot".format(ams_path, mac_address))
 
 		# try:
 		# 	#rshell_output = 'simulate rshell'
@@ -342,9 +305,9 @@ async def esptool_functions(port, action, log):
 		# 	log.push("Error: {}".format(e.output.decode()))
 		# 	return
 
-		log.push(" ")
-		log.push("\n\ninit complete! \n")
-		log.push("----------------------------")
+		# log.push(" ")
+		log.push("\n\nbootstrap complete! \n")
+		#log.push("----------------------------")
 		print('{}: init completed'.format(port))
 
 
@@ -715,7 +678,7 @@ def mqtt_nodelist():
 				hostname = row['node']
 				mac_address = row['mac']
 				mqtt_client = servers[row['server']].client
-				mqtt_client.publish("hass/sensor/esp/{}/state".format(mac_address), "shutdown")
+				mqtt_client.publish("hass/sensor/esp/{}/state".format(mac_address), "shutdown", retain=True)
 				ui.notify("shutdown: {} ({})".format(hostname, mac_address))
 
 			# remove mqtt config and sensor
@@ -736,8 +699,10 @@ def mqtt_nodelist():
 		rows = await grid.get_selected_rows()
 		if rows:
 			for row in rows:
+				mac_address = row['mac']
 				mqtt_client = servers[row['server']].client
-				mqtt_client.publish(row['node'] + "/shutdown", "shutdown")
+				print("shutdown: server {} (node {})".format(row['server'].server, mac_address))
+				mqtt_client.publish( "hass/sensor/esp/{}/state".format(mac_address), "shutdown", retain=True)
 
 		else:
 			ui.notify('No rows selected.')

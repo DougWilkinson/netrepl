@@ -110,17 +110,14 @@ skip = ("#",
 		"random",
 		"re",
 		"os",
+		"select", 
 		"struct", 
 		"sys",
 		"time",
 		"traceback",
 		"types",
-		"uasyncio", 
-		"ubinascii", 
-		"uhashlib", 
+		"binascii", 
 		"umqtt.simple", 
-		"uos", 
-		"ustruct", 
 		"webrepl")
 
 
@@ -188,9 +185,10 @@ class NetRepl:
 
 		filename = source.split("/")[-1:][0]
 		output_path = self.ams_path / (filename.split(".")[0] + ".mpy")
-		rc = subprocess.run("mpy-cross {} -o {}".format(source_path, output_path), shell=True)
+		rc = subprocess.run("mpy-cross {} -o {}".format(source_path, output_path), shell=True, capture_output=True)
 		if rc.returncode > 0:
 			self.logger.info("Error ({}) generating {}".format(rc.returncode, output_path))
+			self.logprint(rc.stderr.decode("utf-8"))
 			return ""
 		return output_path
 
@@ -371,7 +369,7 @@ class NetRepl:
 
 
 	def remote_stat(self, file: File) -> bool:
-		result = str(self.send_command('uos.stat("{}")'.format(file.path) ))
+		result = str(self.send_command('os.stat("{}")'.format(file.path) ))
 		if "Error" in result:
 			#print(self.result)
 			return False
@@ -393,11 +391,11 @@ class NetRepl:
 	
 	def remote_listdir(self, path="") -> list:
 		try:
-			result = str(self.send_command('uos.listdir("{}")'.format(path)))
+			result = str(self.send_command('os.listdir("{}")'.format(path)))
 			#print(result)
 			slashed = result.replace("'",'"')
 			#print(slashed)
-			slashed = slashed.replace('b"uos.listdir("{}")\\r\\n'.format(path),'{"files": ')
+			slashed = slashed.replace('b"os.listdir("{}")\\r\\n'.format(path),'{"files": ')
 			#print(slashed)
 			slashed = slashed.replace('\\r\\n"','}')
 			#print(slashed)
@@ -416,14 +414,15 @@ class NetRepl:
 			
 			name_no_ext = source_name.split(".")[0]
 
-			print("confirm_files: file: {}".format(name_no_ext) )
+			#print("confirm_files: file: {}".format(source_name) )
 
 			if ".py" in source_name and use_mpy:
 				# generate .mpy and make this the source file
-				#print("using .mpy for {}".format(source_name))
+				#print("confirm_files: trying mpy-cross for {}".format(source_name))
 				if not self.make_mpy(source_name):
 					self.logprint("mpy-cross failed for: {} in {}".format(source_name, source_files[source_name]) )
 					return False
+				#print("confirm_files: mpy-cross OK for: {}".format(source_name) )
 
 			else:
 
@@ -509,7 +508,7 @@ class NetRepl:
 
 	def remove_file(self, filename):
 		try:
-			result = self.send_command('uos.remove("{}")'.format(filename))
+			result = self.send_command('os.remove("{}")'.format(filename))
 			if b'Error' not in result:
 				self.logprint("removed: {}".format(filename) )
 			else:
@@ -855,21 +854,24 @@ class NetRepl:
 
 		return True
 
-	def update(self, mac_address):
+	def update(self, mac_address=None):
 		self.logprint("update: checking source files")
 
-		self.remote_mac = mac_address
+		if mac_address:
+			self.remote_mac = mac_address
 
-		if not os.stat( self.ams_path / mac_address ):
-			self.logprint("update: FATAL - no MAC file - stopping")
-			return False
+			if not os.stat( self.ams_path / mac_address ):
+				self.logprint("update: FATAL - no MAC file - stopping")
+				return False
 
-		macfile_hostname = self.load_config()
+			macfile_hostname = self.load_config()
 
-		if not macfile_hostname:
-			self.logprint("update: FATAL - MAC file missing hostname - stopping")
-			return False
-
+			if not macfile_hostname:
+				self.logprint("update: FATAL - MAC file missing hostname - stopping")
+				return False
+		else:
+			macfile_hostname = self.hostname
+			
 		hostname_filename = self.ams_path / (macfile_hostname + ".py")
 
 		try:
@@ -883,7 +885,7 @@ class NetRepl:
 		args = ["boot.py", "main.py", hostname_filename.name, self.remote_mac]
 		imported_files = self.get_files(args)
 
-		if not self.confirm_files(imported_files):
+		if not self.confirm_files(imported_files, use_mpy=True):
 			self.logprint("update: check for missing files or mpy compiler issues - stopping update")
 			return False
 

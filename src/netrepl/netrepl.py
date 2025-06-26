@@ -283,7 +283,7 @@ def setup(netrepl) -> bool:
 
 	# make sure we have uos
 	netrepl.logprint("checking for uos ...")
-	result = str(netrepl.send_command('import uos'))
+	result = str(netrepl.send_command('import os'))
 	if "Error" in result:
 		netrepl.logprint(result)
 		netrepl.logprint("uos not imported - stopping")
