@@ -1,7 +1,7 @@
 # ngmqttserver.py
 
 import paho.mqtt.client as mqtt
-from mysecrets import mqtt_user, mqtt_pass
+from mysecrets import mqtt_user, mqtt_pass, mqtt_servers
 import json
 
 mqtt_nodes = {}
@@ -51,3 +51,27 @@ class NGMQTTServer:
 		
 		message = mqtt_message.payload.decode()
 		self.add_update_node( topic, message)
+
+# Initialize MQTT servers based on mysecrets
+servers = {}
+for server in mqtt_servers:
+	servers[server] = NGMQTTServer(server)
+
+def shutdown_node(mac_address):
+	for server in servers:
+		mqtt_client = servers[server].client
+		print("shutdown: server {} (node {})".format(server, mac_address))
+		mqtt_client.publish( "hass/sensor/esp/{}/state".format(mac_address), "shutdown", retain=True)
+
+	return
+
+def remove_node(mac_address):
+	for server in servers:
+		mqtt_client = servers[server].client
+		print("remove: server {} (node {})".format(server, mac_address))
+		mqtt_client.publish( "hass/sensor/esp/{}/state".format(mac_address), "", retain=True)
+		mqtt_client.publish( "hass/sensor/esp/{}/attrs".format(mac_address), "", retain=True)
+		mqtt_client.publish( "hass/sensor/esp/{}/set".format(mac_address), "", retain=True)
+		mqtt_client.publish( "homeassistant/sensor/esp/{}/config".format(mac_address), "", retain=True)
+
+	return

@@ -1,6 +1,11 @@
 # aconsole.py
 
 from nicegui import ui, app, Client
+
+# used for pausing console output in /console
+from types import SimpleNamespace
+import httpx
+
 from mysecrets import mqtt_servers, ams_path
 import json
 import multiprocessing
@@ -13,8 +18,10 @@ import re
 import time
 import pathlib
 from datetime import datetime
-from ngmqttserver import NGMQTTServer, mqtt_nodes
+from ngmqttserver import NGMQTTServer, mqtt_nodes, shutdown_node, remove_node
 import os
+
+device_password = os.environ.get("WRPWD")
 
 waitfor_continue = threading.Event()
 
@@ -77,14 +84,13 @@ cp hassdocker/mysecrets.py /pyboard
 repl ~ import machine ~ machine.reset() ~
 """
 
-# Initialize MQTT servers based on mysecrets
-servers = {}
-for server in mqtt_servers:
-	servers[server] = NGMQTTServer(server)
 
 row_data = ["loading...","",""]
 
 output = []
+
+def local_time():
+	return time.strftime("%Y/%m/%d-T%H:%M:%S",time.localtime())
 
 def call_check_output(command, thread_done):
 	global output
@@ -374,8 +380,8 @@ def esptool_table():
 	
 			# {'headerName': 'Status', 'field': 'status', 'width': 80,
 			# 			'cellClassRules': {
-            # 			'bg-red-300': 'x == "offline"',
-            # 			'bg-blue-300': 'x == "shutdown"',
+			# 			'bg-red-300': 'x == "offline"',
+			# 			'bg-blue-300': 'x == "shutdown"',
 			#             'bg-green-300': 'x == "online"'} },
 	
 	grid = ui.aggrid( {'columnDefs': column_data,
@@ -478,55 +484,231 @@ async def esptool(device, client: Client, action: str="", chip_type: str="", mac
 	print('{}: esptool page closed'.format(device))
 
 
-###########################################
-## CONSOLE
-###########################################
 
-@ui.page('/console/{action}')
-async def console_page(action, client: Client):
-	print("loading console page for {}".format(action))
+
+###########################################
+## ESP32 proxy for SSE messages
+###########################################
+	
+
+
+async def sse_proxy(hostname: str, queue: asyncio.Queue):
+	# Authenticate with ESP32 (password only) and stream /tail_console into queue.
+
+	print("sse_proxy: setting up: {}".format(hostname))
+
+	login_url = f"http://{hostname}/"
+	sse_url = f"http://{hostname}/tail_console"
+
+	timeout = httpx.Timeout(connect=10, read=130, write=130, pool=130)
+	
+	while True:
+		try:
+			print("sse_proxy: connecting to: {}".format(hostname))
+			await queue.put(f"[INFO] Starting proxy connection to: {hostname}")
+			
+			async with httpx.AsyncClient(timeout=timeout) as client:
+				# 1) Authenticate with password only
+				print("sse_proxy: authenticating to: {}".format(hostname))
+				resp = await client.post(
+					login_url,
+					data={"password": device_password},
+					follow_redirects=True,
+				)
+				if resp.status_code != 200:
+					print("sse_proxy: login failed for: {}".format(hostname))
+					await queue.put(f"[ERROR] Login failed for {hostname}: {resp.text}")
+					return
+
+				# 2) Connect to SSE with session cookie
+				print("sse_proxy: starting sse stream to: {}".format(hostname))
+				async with client.stream("GET", sse_url) as response:
+					if response.status_code != 200:
+						print("sse_proxy: SSE connection failed for: {}".format(hostname))
+						await queue.put(f"[ERROR] SSE connection failed: {response.status_code}")
+						return
+
+					print("sse_proxy: handling responses for: {}".format(hostname))
+					async for raw_line in response.aiter_lines():
+						#print("raw_line: ", raw_line)
+						if raw_line.startswith("data: "):
+							msg = raw_line[6:]  # strip "data: "
+							await queue.put(msg)
+		
+		except httpx.ReadTimeout:
+			print("sse_proxy: read timeout for: {}".format(hostname))
+			await queue.put(f"[ERROR] Read timeout")
+			await asyncio.sleep(1)
+
+		except Exception as e:
+			print("sse_proxy: exception for: {}: {}".format(hostname, e))
+			await queue.put(f"[ERROR] Lost connection to {hostname}: {e}")
+			await asyncio.sleep(1)
+
+
+state = SimpleNamespace( nodes={}, )
+
+@ui.page('/console/{action}/{hostname}')
+async def console_page(action, hostname, client: Client):
+	print("{}: console: action: {}, hostname: {}".format(local_time(), action, hostname))
 
 	await ui.context.client.connected()
 
-	print(app.storage.tab)
-
 	rows = app.storage.tab['selected_nodes']
 
-	#ui.page_title(hostname)
-
-	# setup event to signal to netrepl that user closed window
-
-	user_exit = threading.Event()
-	
-	#ui.button("Close", on_click=lambda: user_exit.set() )
-
+	mac_address = None
 	for row in rows:
+		if 'node' in row and row['node'] == hostname:
+			mac_address = row['mac']
+			break
 
-		print(row)
-		hostname = row['node']
-		mac_address = row['mac']
+	if not mac_address:
+		ui.notify("FATAL: no mac address for node {} in rows? Unexpected Error!".format(hostname))
+		return
 
-		ui.label(hostname).classes('text-4xl').classes('font-bold')
-		log = ui.log(max_lines=50).classes('h-auto').classes('text-2xl').classes('monospace')
-		#log = ui.log(max_lines=20)
+	# used to signal exit from console for classic netrepl
+	user_exit = asyncio.Event()
+
+	#ui.label(f"Console for {hostname}").classes("text-lg font-bold")
+	
+	# previous AI generated values
+	#log_area = ui.log(max_lines=200).classes("w-full h-96")
+	
+	#log_area = ui.log(max_lines=500).classes('h-full').classes('text-2xl').classes('monospace')
+	
+	paused = {"value": False}
+	buffer = []  # will hold lines while paused
+
+	def toggle_pause():
+		paused["value"] = not paused["value"]
+		if paused["value"]:
+			btn.text = hostname + " - PAUSED"
+		else:
+			btn.text = hostname + " - press to Pause"
+			# flush buffered lines into log
+			for line in buffer:
+				log_area.push(line)
+			buffer.clear()
+
+	#btn = ui.button("Pause", on_click=toggle_pause).classes("mt-2")
+
+	with ui.column().classes('h-screen w-full overflow-hidden'):
+		# HEADER (fixed height)
+		btn = ui.button(hostname + " - press to Pause", on_click=toggle_pause).classes(
+			'p-4 bg-gray-200 w-full shrink-0' ).classes('text-3xl font-bold')
+
+		# LOG (fills remaining space)
+		log_area = ui.log().classes(
+			'flex-1 w-full overflow-auto text-lg font-bold monospace'
+		).style('padding-bottom: 1rem;')
+
+		# FOOTER (fixed height at bottom)
+		ui.label('').classes(
+			'p-4 bg-gray-200 w-full shrink-0'
+		)
+
+	log_area.push("{}: [INFO] Starting: {}".format(local_time(), action))
+
+	# check for webconfig support
+	webconfig = mqtt_nodes[mac_address].get('webconfig', False)
+
+	if action == "update" or action == "reboot" or action == "backup":
 
 		# instantiate netrepl
-		netrepl = NetRepl(hostname, nicegui_log=log, user_exit=user_exit, debug=False, verbose=False)
+		netrepl = NetRepl(hostname, nicegui_log=log_area, user_exit=user_exit, debug=False, verbose=False)
 
 		# start console thread
-
 		console_thread = threading.Thread(
-			target=netrepl.tail_console, 
-			kwargs={'action': action, 'mac_address': mac_address} )
-		
+				target=netrepl.tail_console, 
+				kwargs={'action': action, 'mac_address': mac_address, 'webconfig': webconfig} )
+			
 		console_thread.start()
+
+		time_out = 60
+		while time_out > 0 and console_thread.is_alive():
+			await asyncio.sleep(1)
+			time_out -= 1	
+
+	# for webconfig devices only, console is done here and not in netrepl
+	if webconfig:
+		print("console: webconfig console opened for: {}".format(hostname))
+
+		# Start http console using webconfig
+		ui.navigate.to("/console_start/{}".format(hostname), new_tab=True)
+
+		q = asyncio.Queue()
+
+		sse_task = asyncio.create_task(sse_proxy(hostname, q))
+		print("console: sse_task started for: {}".format(hostname))
+
+		async def reader():
+			while True:
+				line = await q.get()
+				if paused["value"]:
+					buffer.append(line)
+					continue
+				log_area.push(line)
+
+		reader_task = asyncio.create_task(reader())
+		print("console: reader_task started for: {}".format(hostname))
+
+		await client.disconnected()
+		
+		print("console: client disconnected, cleaning up for: {}".format(hostname))
+		sse_task.cancel()
+		reader_task.cancel()
+
+	print("console: Page closed for: {}".format(hostname))
+
+# ####################################################
+# # Connect to esp32 and start console window page
+# ####################################################
 	
-	await client.disconnected()
+# @ui.page("/console_start/{hostname}")
+# async def console_start(hostname: str):
 
-	# signal to netrepl that user closed window
-	user_exit.set()
+# 	ui.label(f"Console for {hostname}").classes("text-lg font-bold")
+# 	log_area = ui.log(max_lines=200).classes("w-full h-96")
 
-	print('{}: console page closed'.format(hostname))
+# 	paused = {"value": False}
+# 	buffer = []  # will hold lines while paused
+
+# 	def toggle_pause():
+# 		paused["value"] = not paused["value"]
+# 		if paused["value"]:
+# 			btn.text = "Resume"
+# 		else:
+# 			btn.text = "Pause"
+# 			# flush buffered lines into log
+# 			for line in buffer:
+# 				log_area.push(line)
+# 			buffer.clear()
+
+# 	btn = ui.button("Pause", on_click=toggle_pause).classes("mt-2")
+
+# 	# if hostname not in state.nodes:
+# 	# 	q = asyncio.Queue()
+# 	# 	task = asyncio.create_task(sse_proxy(hostname, q))
+# 	# 	state.nodes[hostname] = {"task": task, "queue": q}
+
+# 	# q = state.nodes[hostname]["queue"]
+
+# 	q = asyncio.Queue()
+# 	sse_task = asyncio.create_task(sse_proxy(hostname, q))
+
+# 	async def reader():
+# 		while True:
+# 			line = await q.get()
+# 			log_area.push(line)
+
+# 	reader_task = asyncio.create_task(reader())
+
+# 	await client.disconnected()
+# 	sse_task.cancel()
+# 	reader_task.cancel()
+
+
+
 
 
 ###########################################
@@ -599,10 +781,18 @@ def mqtt_nodelist():
 			reboots = mqtt_nodes[node].get('reboots', 0)
 
 			try:
-				row_data.append( {"node": mqtt_nodes[node]['hostname'], 
+				server = mqtt_nodes[node]['mysecrets']
+			except KeyError:
+				try:
+					server = mqtt_nodes[node]['server']
+				except KeyError:
+					server = "n/a"
+				
+			try:
+				row_data.append( {"node": hostname, 
 						"mac": mqtt_nodes[node]['mac'], 
 						"status": mqtt_nodes[node]['status'],
-						"server": mqtt_nodes[node]['mysecrets'],
+						"server": server,
 						"mpy": mpy,
 						"signal": signal,
 						"reboots": reboots,
@@ -643,42 +833,21 @@ def mqtt_nodelist():
 		app.storage.tab['selected_nodes'] = rows
 		print(app.storage.tab)
 
-		if action in "backup|update|reboot|console":
-			ui.navigate.to("/console/{}".format(action), new_tab=True)
-			return
-		
-
+		# if action in "backup|update|reboot|console":
+		# 	ui.navigate.to("/console/{}".format(action), new_tab=True)
+		# 	return
 
 		for row in rows:
-
-			# if action in "update|reboot|console":
-			# 	hostname = row['node']
-			# 	# if "/dev" in hostname:
-			# 	# 	ui.notify("Invalid option for /dev devices")
-			# 	# 	return
-
-			# 	print("/console/{}".format(action))
-				
-			# 	ui.navigate.to("/console/{}".format(action), new_tab=True)
-			# 	#ui.navigate.to("/console/{}?action={}".format(hostname, action), new_tab=True)
-
-
-			# if action == "install" or action == "esptool":
-			# 	if "/dev" not in row['node']:
-			# 		ui.notify("Invalid option: /dev devices only")
-			# 		return
-				
-			# 	hostname = row['node'].split("/")[-1]
-
-			# 	print("/esptool/{}?action={}".format(hostname, action) )
-
-			# 	ui.navigate.to("/esptool/{}?action={}".format(hostname, action), new_tab=True)
+			
+			if row['status'] == "online":
+				if action == "update" or action == "reboot" or action == "backup" or action == "console":
+					hostname = row['node']
+					ui.navigate.to("/console/{}/{}".format(action, hostname), new_tab=True)
 
 			if action == "shutdown" and row['status'] == "offline":
 				hostname = row['node']
 				mac_address = row['mac']
-				mqtt_client = servers[row['server']].client
-				mqtt_client.publish("hass/sensor/esp/{}/state".format(mac_address), "shutdown", retain=True)
+				shutdown_node(mac_address)
 				ui.notify("shutdown: {} ({})".format(hostname, mac_address))
 
 			# remove mqtt config and sensor
@@ -687,25 +856,8 @@ def mqtt_nodelist():
 			if action == "remove" and row['status'] != "online":
 				hostname = row['node']
 				mac_address = row['mac']
-				mqtt_client = servers[row['server']].client
-				mqtt_nodes.pop(mac_address)
-				mqtt_client.publish("homeassistant/sensor/esp/{}/config".format(mac_address), "", retain=True)
-				mqtt_client.publish("hass/sensor/esp/{}/state".format(mac_address), "", retain=True)
-				mqtt_client.publish("hass/sensor/esp/{}/attrs".format(mac_address), "", retain=True)
-				
+				remove_node(mac_address)				
 				ui.notify("removed: {} ({})".format(hostname, mac_address))
-
-	async def shutdown():
-		rows = await grid.get_selected_rows()
-		if rows:
-			for row in rows:
-				mac_address = row['mac']
-				mqtt_client = servers[row['server']].client
-				print("shutdown: server {} (node {})".format(row['server'].server, mac_address))
-				mqtt_client.publish( "hass/sensor/esp/{}/state".format(mac_address), "shutdown", retain=True)
-
-		else:
-			ui.notify('No rows selected.')
 
 	async def output_selected_rows():
 		rows = await grid.get_selected_rows()
@@ -779,15 +931,16 @@ async def test(client: Client):
 	print('preparing')
 	await client.connected()
 	print('connected')
+	#ui.context.client.page_container.default_slot.children[0].props(':style-fn="o => ({ height: `calc(100vh - ${o}px)` })"')
+	#ui.context.client.content.classes('h-full')
+	#log = ui.log(max_lines=500).classes('text-lg').classes('monospace')
 
-	log = ui.log(max_lines=5).classes('text-lg').classes('monospace')
-	log.push("xl monospace")
-	log = ui.log(max_lines=5).classes('text-1xl').classes('monospace')
+	log = ui.log(max_lines=5).classes('text-1xl').classes('monospace bold')
 	log.push("1xl monospace")
 	log = ui.log(max_lines=5).classes('text-2xl').classes('monospace')
 	log.push("2xl monospace")
-	log = ui.log(max_lines=5).classes('text-3xl').classes('monospace')
-	log.push("3xl monospace")
+	log = ui.log(max_lines=5).classes('text-lg font-bold monospace')
+	log.push("text-lg font-bold monospace")
 
 	# with ui.dialog() as dialog, ui.card():
 	# 	ui.label('Are you sure?')

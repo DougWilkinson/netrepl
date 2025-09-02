@@ -12,6 +12,7 @@ import getpass
 import logging
 import threading
 import pathlib
+import requests
 
 #load other modules
 from file import File
@@ -96,6 +97,7 @@ skip = ("#",
 		"framebuf",
 		"functools",
 		"gc",
+		"hashlib",
 		"inspect",
 		"io",
 		"json",
@@ -284,14 +286,18 @@ class NetRepl:
 			raise ImportError
 		return result
 
-	def tail_console(self, mac_address="", timeout=30, action="") -> bool:
+	def tail_console(self, mac_address="", timeout=30, action="", webconfig=False) -> bool:
 
 		if action == "reboot":
-			self.reboot_node()
+			reboot_success = self.reboot_node(webconfig=webconfig)
+			if webconfig:
+				return reboot_success
 		
 		if action == "update":
-			if not self.update(mac_address):
+			if not self.update(mac_address, webconfig=webconfig):
 				return False
+			if webconfig:
+				return True
 
 		if action == "backup":
 			if not self.backup():
@@ -569,8 +575,35 @@ class NetRepl:
 		return error_copying
 
 	# return True if success
-	def reboot_node(self) -> bool:
+	def reboot_node(self, webconfig=False) -> bool:
 
+		if webconfig:
+
+			self.logprint("reboot: sending reboot request")
+
+			login_url = "http://{}/".format(self.hostname)
+			reboot_url = "http://{}/reboot".format(self.hostname)
+
+			login_data = { "password": self.password }
+			session = requests.Session()
+
+			resp = session.post(login_url, data=login_data)
+
+			if resp.status_code != 200:
+				print("Status:", resp.status_code)
+				print("Response:", resp.text)
+				return False
+
+			resp = session.get(reboot_url)
+
+			if resp.status_code != 200:
+				print("Status:", resp.status_code)
+				print("Response:", resp.text)
+				return False
+
+			self.logprint("reboot: success!")
+			return True
+		
 		self.logprint("reboot node started")
 
 		if not self.send_break():
@@ -855,7 +888,7 @@ class NetRepl:
 
 		return True
 
-	def update(self, mac_address=None):
+	def update(self, mac_address=None, webconfig=False):
 		self.logprint("update: checking source files")
 
 		if mac_address:
@@ -887,10 +920,91 @@ class NetRepl:
 		imported_files = self.get_files(args)
 
 		if not self.confirm_files(imported_files, use_mpy=True):
-			self.logprint("update: check for missing files or mpy compiler issues - stopping update")
+			self.logprint("update: FAIL - check for missing files or mpy compiler issues - stopping")
 			return False
 
-		self.logprint("update: starting update")
+		if webconfig:
+
+			self.logprint("update: starting http-based update")
+
+			# setup websocket to connect to sha256
+			# Device and file info
+			login_url = "http://{}/".format(self.hostname)
+			upload_url = "http://{}/upload/{{}}".format(self.hostname)
+			sha256_url = "http://{}/sha256/{{}}".format(self.hostname)
+
+			login_data = { "password": self.password }
+			session = requests.Session()
+
+			resp = session.post(login_url, data=login_data)
+
+			if resp.status_code != 200:
+				print("Status:", resp.status_code)
+				print("Response:", resp.text)
+				return False
+
+			all_success = True
+			remove_py_files = []
+
+			# get_files returns a dictionary of filenames without paths
+			for local_file_name in imported_files:
+
+				if ".py" in local_file_name and local_file_name not in MPY_EXLCUDES:
+					stripped_name = local_file_name.split(".")[0]
+					remove_py_files.append(local_file_name)
+					local_file_name = stripped_name + ".mpy"
+
+				with open(self.ams_path / local_file_name, "rb") as f:
+					data = f.read()
+
+				sha256 = hashlib.sha256(data).hexdigest()
+
+				# Send raw binary (application/octet-stream)
+				resp = session.get( sha256_url.format( local_file_name ) )
+
+				if resp.status_code == 200 and resp.text == sha256:
+					self.logprint("Skipped: {}".format(local_file_name))
+					continue
+				
+				# self.logprint("{}: would have been updated".format(local_file_name))
+
+				resp = session.post( upload_url.format( local_file_name ), 
+						data=data,
+						headers={"Content-Type": "application/octet-stream"} )
+
+				if resp.status_code == 200 and resp.text == sha256:
+					self.logprint("Copied : {}: Updated".format(local_file_name))
+				else:
+					self.logprint("Failed : {}".format(local_file_name))
+					if ".mpy" in local_file_name:
+						# Don't remove .py if .mpy didn't get updated with success
+						remove_py_files.pop()
+
+					all_success = False
+
+			if not all_success:
+				self.logprint("Update failed for some files, stopping")
+				return False
+			
+			self.logprint("Update confirmed, cleaning up old files")
+
+			for file in remove_py_files:
+				resp = session.get("http://{}/remove/{}.py".format(self.hostname, file) )
+
+				if resp.status_code != 404:
+					self.logprint("Remove failed for: {}".format(file))
+					
+			resp = session.get("http://{}/reboot".format(self.hostname) )
+
+			if resp.status_code != 200:
+				self.logprint("Reboot failed, stopping")
+				return False
+			
+			sleep(5)
+			return True
+
+
+		self.logprint("update: starting webrepl-based update")
 
 		if not self.setup():
 			return False
