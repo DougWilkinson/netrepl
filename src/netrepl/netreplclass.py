@@ -79,6 +79,7 @@ exec (genhash_function)
 MPY_EXLCUDES = ("boot.py", 
 				"natives.py",
 				"main.py",
+				"gc9a01.py",
 				"mysecrets.py")
 
 # Recursive function takes a .py file and looks for imported
@@ -183,11 +184,10 @@ class NetRepl:
 		# self.logger.addHandler(self.weblog)
 		self.logger.addHandler(self.logconsole)
 
-	def make_mpy(self, source):
-		source_path = self.ams_path / source
+	def make_mpy(self, source_path):
 
-		filename = source.split("/")[-1:][0]
-		output_path = self.ams_path / (filename.split(".")[0] + ".mpy")
+		stem = source_path.stem
+		output_path = self.ams_path / "build/{}.mpy".format(stem)
 		rc = subprocess.run("mpy-cross {} -o {}".format(source_path, output_path), shell=True, capture_output=True)
 		if rc.returncode > 0:
 			self.logger.info("Error ({}) generating {}".format(rc.returncode, output_path))
@@ -417,23 +417,23 @@ class NetRepl:
 	# Check that local file exists and mpy version exists if applicable
 	def confirm_files(self, source_files, use_mpy=False) -> bool:
 
-		for source_name in source_files:
+		for source_name, source_path in source_files.items():
 			
 			name_no_ext = source_name.split(".")[0]
 
 			#print("confirm_files: file: {}".format(source_name) )
 
-			if ".py" in source_name and use_mpy:
+			if ".py" in source_name and use_mpy and source_name not in MPY_EXLCUDES:
 				# generate .mpy and make this the source file
 				#print("confirm_files: trying mpy-cross for {}".format(source_name))
-				if not self.make_mpy(source_name):
+				if not self.make_mpy(source_path):
 					self.logprint("mpy-cross failed for: {} in {}".format(source_name, source_files[source_name]) )
 					return False
 				#print("confirm_files: mpy-cross OK for: {}".format(source_name) )
 
 			else:
 
-				if not self.local_stat(File(self.ams_path / source_name) ):
+				if not self.local_stat(File(str(source_path) ) ):
 					self.logprint("confirm_files: source file {} from {} not found".format(source_name, source_files[source_name]) )
 					return False
 			
@@ -441,30 +441,34 @@ class NetRepl:
 
 		return True
 
-	def put_file(self, source_name, dryrun=True, use_mpy=False, force=False) -> File:
+	def put_file(self, source_path, dryrun=True, use_mpy=False, force=False) -> File:
 		error_copying = File("error_copying", exists=False)
 		error_hashfile = File("error_hashfile", exists=False)
 
-		name_no_ext = source_name.split(".")[0]
+		name_no_ext = source_path.stem
+		source_name = source_path.name
 
 		print("put_file: {}".format(name_no_ext) )
 
 		if ".py" in source_name and use_mpy:
 			# generate .mpy and make this the source file
 			#print("using .mpy for {}".format(source_name))
-			source_file = File(self.make_mpy(source_name))
+			path_to_mpy = self.make_mpy(source_path)
+			print("put_file: path to mpy: {}".format(path_to_mpy) )
+			source_file = File(str(path_to_mpy) )
+			print("put_file: source_file.path: {}".format(source_file.path) )
 			dest_file = File(name_no_ext + ".mpy")
 		else:
 			# Use original file name as source
 			#print("using {}".format(source_name))
-			source_file = File(self.ams_path / source_name)
+			source_file = File(str(source_path))
 			#print("source name:", source_name)
 			#print("dest_name", dest_name)
 			dest_file = File(source_name)
 		
 		missing_source = File("missing_source", exists=False)
 		if not self.local_stat(source_file):
-			print("put_file: source file {} not found".format(source_name) )
+			print("put_file: source file {} not found".format(source_path) )
 			return missing_source
 
 		# directory is handled by calling function
@@ -500,10 +504,7 @@ class NetRepl:
 
 		# Cleanup .py if .mpy was copied or exists
 		if use_mpy:
-			if "/" in source_name:
-				py_file = File(source_name.split("/")[-1:][0] )
-			else:
-				py_file = File(source_name)
+			py_file = File(source_name)
 			if self.remote_stat(py_file):
 				if py_file.exists:
 					if dryrun:
@@ -732,22 +733,22 @@ class NetRepl:
 			self.logprint("setup: FATAL - import failed - stopping")
 			return False
 
-		self.send_command('espMAC = str(hexlify(WLAN().config("mac")).decode() )' )
+		# self.send_command('espMAC = str(hexlify(WLAN().config("mac")).decode() )' )
 
-		self.remote_mac = self.getvar('espMAC')
-		if not self.remote_mac:
-			self.logprint("setup: FATAL - no espMAC - stopping")
-			return False
-		print(self.remote_mac)
+		# self.remote_mac = self.getvar('espMAC')
+		# if not self.remote_mac:
+		# 	self.logprint("setup: FATAL - no espMAC - stopping")
+		# 	return False
+		# print(self.remote_mac)
 
-		# Get hostname from local macfile if we confirmed espMAC
-		if self.remote_mac:
-			self.logprint("setup: MAC address: {}".format(self.remote_mac))
-			self.macfile_hostname = self.load_config()
-			self.logprint("setup: mac file found - using hostname: {}".format(self.macfile_hostname))
-		else:
-			self.logprint("setup: FATAL - corrupt mac file or not found - stopping")
-			return False
+		# # Get hostname from local macfile if we confirmed espMAC
+		# if self.remote_mac:
+		# 	self.logprint("setup: MAC address: {}".format(self.remote_mac))
+		# 	self.macfile_hostname = self.load_config()
+		# 	self.logprint("setup: mac file found - using hostname: {}".format(self.macfile_hostname))
+		# else:
+		# 	self.logprint("setup: FATAL - corrupt mac file or not found - stopping")
+		# 	return False
 
 		# If NameError, hash function not imported on device, load and try again
 		
@@ -771,42 +772,44 @@ class NetRepl:
 
 		while stack:
 			current_filename = stack.pop()
-			print(f"Looking for imports in: {current_filename}")
-			file_path = pathlib.Path(self.ams_path / current_filename)
 
-			try:
-				with open(file_path) as file:
-					for line in file:
-						items = line.strip().split()
+			for prefix in ["hosts/", "core/", ""]:
+				full_path = pathlib.Path(self.ams_path / (prefix + current_filename) )
 
-						# Handle #fakeimport
-						if "#fakeimport" in line and len(items) > 1:
-							found[items[1]] = current_filename
-							continue
+				if full_path.exists():
+					print("find_imports: added to found: {}".format(full_path) )
+					found[current_filename] = full_path
 
-						# Ignore imports of the same file
-						if len(items) > 1 and current_filename.split(".")[0] == items[1]:
-							print(f"filename=import: {line.strip()}")
-							continue
-						if len(items) > 3 and current_filename.split(".")[0] == items[3]:
-							print(f"filename=import: {line.strip()}")
-							continue
+					with open(full_path) as file:
+						for line in file:
+							items = line.strip().split()
 
-						# Process actual imports
-						if "import" in line or "from " in line:
-							print(f"{current_filename}: import or from: {items}")
-							if len(items) > 1 and items[1] not in skip and "#" not in items[0]:
-								print(f"item1 {items[1]} and item0 {items[0]} not in skip or comment")
-								if items[0] in ("from", "import"):
-									nextfile = items[1] + ".py"
-									if nextfile not in found:  # Prevent duplicates
-										print("looking at nextfile:", nextfile)
-										stack.append(nextfile)
-										found[nextfile] = current_filename
-			except FileNotFoundError:
-				continue
+							# Handle #fakeimport
+							if "#fakeimport" in line and len(items) > 1:
+								stack.append(items[1] + ".py")
+								continue
 
-		print("find_imports: found:", found)
+							# Ignore imports of the same file
+							if len(items) > 1 and current_filename.split(".")[0] == items[1]:
+								#print(f"filename=import: {line.strip()}")
+								continue
+							if len(items) > 3 and current_filename.split(".")[0] == items[3]:
+								#print(f"filename=import: {line.strip()}")
+								continue
+
+							# Process actual imports
+							if "import" in line or "from " in line:
+								#print(f"{current_filename}: import or from: {items}")
+								if len(items) > 1 and items[1] not in skip and "#" not in items[0]:
+									#print(f"item1 {items[1]} and item0 {items[0]} not in skip or comment")
+									if items[0] in ("from", "import"):
+										nextfile = items[1] + ".py"
+										if nextfile not in found:  # Prevent duplicates
+											print("looking at nextfile:", nextfile)
+											stack.append(nextfile)
+											#found[nextfile] = full_path.parents
+
+		print("find_imports: total found:", found)
 		return found
 
 
@@ -875,15 +878,15 @@ class NetRepl:
 		
 	def put_files(self, files, dryrun=False, force=False, mpy_ok=True):
 
-		for file in set(files):
+		for filename, file_path in files.items():
 
-			if 'mysecrets' in file:
-				self.logprint("skip   : mysecrets already exists")
-				continue
+			# if 'mysecrets' in filename:
+			# 	self.logprint("skip   : mysecrets already exists")
+			# 	continue
 			
-			mpy_ok = file not in MPY_EXLCUDES and ".py" in file
+			mpy_ok = filename not in MPY_EXLCUDES and ".py" in filename
 
-			if not self.put_file(file, dryrun=dryrun, use_mpy=mpy_ok, force=force):
+			if not self.put_file(file_path, dryrun=dryrun, use_mpy=mpy_ok, force=force):
 				return False
 
 		return True
@@ -901,29 +904,29 @@ class NetRepl:
 			macfile_hostname = self.load_config()
 
 			if not macfile_hostname:
-				self.logprint("update: FATAL - MAC file missing hostname - stopping")
+				self.logprint("update: FATAL - expected MAC file - stopping")
 				return False
 		else:
 			macfile_hostname = self.hostname
 			
-		hostname_filename = self.ams_path / (macfile_hostname + ".py")
+		hostname_path = self.ams_path / ( "hosts/{}.py".format(macfile_hostname) )
 
 		try:
-			self.logprint(self.ams_path / hostname_filename)
-			r = os.stat( self.ams_path / hostname_filename )
+			self.logprint(hostname_path)
+			r = os.stat( hostname_path )
 				
 		except FileNotFoundError:
-			self.logprint("update: FATAL - no hostname or MAC files - stopping")
+			self.logprint("update: FATAL - no hostname file found - stopping")
 			return False
 
-		args = ["boot.py", "main.py", hostname_filename.name, self.remote_mac]
+		args = ["boot.py", "main.py", self.hostname + ".py"]
 		imported_files = self.get_files(args)
 
 		if not self.confirm_files(imported_files, use_mpy=True):
 			self.logprint("update: FAIL - check for missing files or mpy compiler issues - stopping")
 			return False
 
-		if webconfig:
+		if webconfig > 1:
 
 			self.logprint("update: starting http-based update")
 

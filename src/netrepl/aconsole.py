@@ -62,7 +62,7 @@ style_sheet = '''
 		--ag-odd-row-background-color: rgb(0, 0, 0, 0.03);
 		--ag-header-column-resize-handle-color: rgb(126, 46, 132);
 
-		--ag-font-size: 26px;
+		--ag-font-size: 18px;
 		--ag-font-family: monospace;
 	}
 	</style>
@@ -385,7 +385,7 @@ def esptool_table():
 			#             'bg-green-300': 'x == "online"'} },
 	
 	grid = ui.aggrid( {'columnDefs': column_data,
-		'auto_size_columns': False,
+		'auto_size_columns': True,
 		'rowData': row_data,
 		'rowSelection': 'multiple',
    		} ).classes('h-[1500px]' )
@@ -610,7 +610,7 @@ async def console_page(action, hostname, client: Client):
 	log_area.push("{}: [INFO] Starting: {}".format(local_time(), action))
 
 	# check for webconfig support
-	webconfig = mqtt_nodes[mac_address].get('webconfig', False)
+	webconfig = int(mqtt_nodes[mac_address].get('webconfig', 0))
 
 	if action == "update" or action == "reboot" or action == "backup":
 
@@ -630,7 +630,7 @@ async def console_page(action, hostname, client: Client):
 			time_out -= 1	
 
 	# for webconfig devices only, console is done here and not in netrepl
-	if webconfig:
+	if webconfig > 1:
 		print("console: webconfig console opened for: {}".format(hostname))
 
 		# Start http console using webconfig
@@ -719,6 +719,8 @@ async def console_page(action, hostname, client: Client):
 def mqtt_nodelist():
 	print('home page opened - mqtt_nodelist')
 
+	ui.add_head_html('<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">')
+
 	ui.add_body_html(style_sheet)
 	# dark = ui.dark_mode()
 	# dark.enable()
@@ -732,10 +734,10 @@ def mqtt_nodelist():
 
 		row_data.clear()
 
-		for node in mqtt_nodes:
+		for mac, node in mqtt_nodes.items():
 			#print("node: {}".format(node))
-			hostname = mqtt_nodes[node].get('hostname', node)
-			build = mqtt_nodes[node].get('platform', "")
+			hostname = node.get('hostname', "cubeclock")
+			build = node.get('platform', "")
 			chip = "unknown"
 			platform = ""
 
@@ -750,7 +752,7 @@ def mqtt_nodelist():
 				elif "ESP32" in build:
 					platform = "32"
 
-			# total_mem = mqtt_nodes[node].get('memory', 0)
+			# total_mem = node.get('memory', 0)
 			#print(f"{hostname}: {node} {total_mem} {chip} {build} {platform}")
 			# if total_mem:
 
@@ -759,7 +761,7 @@ def mqtt_nodelist():
 			# 	else:
 			# 		platform = "{}({:.0f}K) {}".format(chip, total_mem / 1000, build)
 
-			last_restart = mqtt_nodes[node].get('last_restart', "")
+			last_restart = node.get('last_restart', "")
 
 			if last_restart:
 
@@ -775,32 +777,32 @@ def mqtt_nodelist():
 
 				uptime = "{}d".format(days_passed)
 
-			mpy = mqtt_nodes[node].get('mpy', "?.??.0")[0:4]
+			mpy = node.get('mpy', "?.??.0")[0:4]
 
-			signal = mqtt_nodes[node].get('signal', 0)
-			reboots = mqtt_nodes[node].get('reboots', 0)
+			signal = node.get('signal', 0)
+			reboots = node.get('reboots', 0)
 
 			try:
-				server = mqtt_nodes[node]['mysecrets']
+				server = node['mysecrets']
 			except KeyError:
 				try:
-					server = mqtt_nodes[node]['server']
+					server = node['server']
 				except KeyError:
 					server = "n/a"
-				
-			try:
-				row_data.append( {"node": hostname, 
-						"mac": mqtt_nodes[node]['mac'], 
-						"status": mqtt_nodes[node]['status'],
-						"server": server,
-						"mpy": mpy,
-						"signal": signal,
-						"reboots": reboots,
-						"uptime": uptime,
-						"platform": platform
-						} )
-			except KeyError:
-				pass
+			
+			status = node.get('status', "unknown")
+
+			row_data.append( {"node": hostname, 
+					"mac": mac, 
+					"status": status,
+					"server": server,
+					"mpy": mpy,
+					"signal": signal,
+					"reboots": reboots,
+					"uptime": uptime,
+					"platform": platform
+					} )
+
 		#print(row_data)
 		
 		# for device in pathlib.Path('/dev').glob('tty[UA][SC][BM]*'):
@@ -876,38 +878,55 @@ def mqtt_nodelist():
 
 	with ui.button_group():
 		#ui.link('console', "/console", new_tab=True)
-		ui.button('console', on_click=lambda e: console(e.sender))
-		ui.button('update', on_click=lambda e: console(e.sender))
-		ui.button('reboot', on_click=lambda e: console(e.sender))
-		ui.button('backup', on_click=lambda e: console(e.sender))
-		ui.button('shutdown', on_click=lambda e: console(e.sender))
-		ui.button('remove', on_click=lambda e: console(e.sender))
-		ui.button('esptool', on_click=lambda e: esptool_handler(e.sender) )
-		ui.button('resize', on_click=lambda e: grid.run_grid_method('autoSizeAllColumns') ) 
+		ui.button('console', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('update', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('reboot', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('backup', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('shutdown', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('remove', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('esptool', on_click=lambda e: esptool_handler(e.sender) ).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('resize', on_click=lambda e: grid.run_grid_method('autoSizeAllColumns') ).style('font-size: 10px; width: 60px; height: 10px;')
 
 	ui.timer(3, update_rows)
 
+
+	def icon_renderer(params):
+		"""Custom cell renderer to display an icon based on cell value."""
+		if params.value == 'online':
+			return '<i class="fa fa-check-circle text-green-500"></i>'
+		
+		if params.value == 'offline':
+			return '<i class="fa fa-times-circle text-red-500"></i>'
+		
+		return '<i class="fa fa-times-circle text-blue-500"></i>'
+		
+	# column_defs = [
+	# 	{'headerName': 'Status', 'field': 'status', 'cellRenderer': icon_renderer},
+	# 	{'headerName': 'Name', 'field': 'name'},
+	# ]
+
 	column_data = [
-			{'headerName': 'Node', 'field': 'node', 'width': 15, 'checkboxSelection': True},
-			{'headerName': 'Status', 'field': 'status', 'width': 10,
+			{'headerName': 'Node', 'field': 'node', 'width': 50, 'checkboxSelection': True},
+			{'headerName': 'St', 'field': 'status', ':valueFormatter': '(params) => params.value === "online" ? "✅" : (params.value === "shutdown" ? "💤" : "❌")', 'width': 5,
 				# 'cellClassRules': {
 				# 'bg-red-300': 'x == "offline"',
 				# 'bg-blue-300': 'x == "shutdown"',
 				# 'bg-green-300': 'x == "online"'} 
 				},
-			{'headerName': 'uptime', 'field': 'uptime', 'width': 4},
+			{'headerName': 'up', 'field': 'uptime', 'width': 4},
 			{'headerName': 'db', 'field': 'signal', 'width': 4},
-			{'headerName': 'RBs', 'field': 'reboots', 'width': 3},
-			{'headerName': 'platform', 'field': 'platform', 'width': 15},
-			{'headerName': 'Mac', 'field': 'mac', 'width': 15},
-			{'headerName': 'Server', 'field': 'server', 'width': 6},
-			{'headerName': 'mpy', 'field': 'mpy', 'width': 8},
+			{'headerName': 'RBs', 'field': 'reboots', 'width': 4},
+			#{'headerName': 'platform', 'field': 'platform', 'width': 15},
+			#{'headerName': 'Mac', 'field': 'mac', 'width': 15},
+			{'headerName': 'Server', 'field': 'server', 'width': 35},
+			#{'headerName': 'mpy', 'field': 'mpy', 'width': 8},
 		]
 	
 	grid = ui.aggrid( {'columnDefs': column_data,
 		'autoSizeStrategy': 'fitCellContents',
 		'rowData': row_data,
 		'rowSelection': 'multiple',
+		'rowHeight': 20,
 	} ).classes('h-[1500px]' )
 
 	#print(grid.options)
