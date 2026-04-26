@@ -18,9 +18,12 @@ import re
 import time
 import pathlib
 from datetime import datetime
-from ngmqttserver import NGMQTTServer, mqtt_nodes, shutdown_node, remove_node
+from ngmqttserver import NGMQTTServer, mqtt_nodes, shutdown_node, remove_node, resubscribe_all
 import os
 
+def pflush(*args):
+	print(*args, flush=True)
+	
 device_password = os.environ.get("WRPWD")
 
 waitfor_continue = threading.Event()
@@ -100,16 +103,19 @@ def call_check_output(command, thread_done):
 			output.insert(0, (subprocess.check_output(command) ) )
 			break
 		except subprocess.CalledProcessError as e:
-			print("retry: {}: ".format(i+1), command)
+			pflush("retry: {}: ".format(i+1), command)
 			output.insert(0, "error" )
 
 	thread_done.set()
 
-async def outsource_function(command):
+async def outsource_function(command, logger=None):
 	global output
 	thread_done = asyncio.Event()
 
-	print("outsource_function: command: {}".format(command))
+	if logger:
+		logger.push("outsource_function: command: {}".format(command))
+
+	pflush("outsource_function: command: {}".format(command))
 	
 	process = threading.Thread(target=call_check_output, args=(command, thread_done))
 	process.start()
@@ -122,16 +128,16 @@ async def esptool_functions(port, action, log):
 
 	if action == "reset":
 
-		print("{}: starting esptool (reset_port)".format(port))
+		pflush("{}: starting esptool (reset_port)".format(port))
 
 		log.push("resetting port on {}\n".format(port) )
 
 		reset_args = esptool_modes["chip_id_reset"].format(port).split()
 
-		print("before await outsource_function")
-		await outsource_function(reset_args)
+		pflush("before await outsource_function")
+		await outsource_function(reset_args, logger=log)
 
-		print("after await outsource_function")
+		pflush("after await outsource_function")
 		result = output[0].decode()
 
 		# for line in result.split("\n"):
@@ -144,7 +150,7 @@ async def esptool_functions(port, action, log):
 		time.sleep(2)
 
 	if action in "install_chipid_flash_bootstrap":
-		print("{}: starting (chip_id)".format(port))
+		pflush("{}: starting (chip_id)".format(port))
 
 		# if action == "bootstrap":
 		# 	log.push("reading chip_id {} (RESET)\n".format(port) )
@@ -155,7 +161,8 @@ async def esptool_functions(port, action, log):
 		
 		await outsource_function(chip_id_args)
 
-		chip_id_output = output[0].decode()
+		chip_id_output = output[0]
+		log.push("chip_id_output: {}".format(output))
 
 		if chip_id_output == "error":
 			log.push("error reading chip_id on: {}\n".format(port) )
@@ -176,7 +183,7 @@ async def esptool_functions(port, action, log):
 				chip_type += "dev"
 		
 		if not chip_type or not mac_address:
-			print("Error: could not determine chip_type or mac_address")
+			pflush("Error: could not determine chip_type or mac_address")
 			log.push(" ")
 			log.push("Error: could not determine chip_type or mac_address - stopping")
 			log.push("----------------------------")
@@ -190,13 +197,13 @@ async def esptool_functions(port, action, log):
 		log.push("mac_address: {}".format(mac_address))
 		log.push("----------------------------")
 
-		print("chip_id: chip_type: {}, mac_address: {}".format(chip_type, mac_address))
+		pflush("chip_id: chip_type: {}, mac_address: {}".format(chip_type, mac_address))
 		
 		# wait for device
 		time.sleep(2)
 
 	if action in "install_erase":
-		print("{}: starting (erase_flash)".format(port))
+		pflush("{}: starting (erase_flash)".format(port))
 
 		log.push("erasing flash on {}\n".format(port) )
 		log.push(" ")
@@ -230,7 +237,7 @@ async def esptool_functions(port, action, log):
 	time.sleep(2)
 
 	if action in "install_flash":		
-		print("{}: starting (write_flash)".format(port))
+		pflush("{}: starting (write_flash)".format(port))
 
 		log.push("writing flash on {}\n".format(port))
 		
@@ -266,7 +273,7 @@ async def esptool_functions(port, action, log):
 
 	if action in "install_bootstrap":
 
-		print("{}: starting rshell (copy_bootstrap_files)".format(port))
+		pflush("{}: starting rshell (copy_bootstrap_files)".format(port))
 
 		log.push(" ")
 		log.push("RSHELL: creating/copying files to {}\n".format(port) )
@@ -281,8 +288,8 @@ async def esptool_functions(port, action, log):
 			f.write('{}\n'.format(rshell_commands.format(ams_path, mac_address, mac_address) ) )
 
 		# await outsource_function("ls -al /dev/ttyACM*".split() )
-		# print(output[0].decode())
-		#print(os.listdir("/dev/"))
+		# pflush(output[0].decode())
+		#pflush(os.listdir("/dev/"))
 
 		rshell_args = "rshell -p /dev/{} -f file_copy_list".format(port).split()
 		#log.push(rshell_args)
@@ -314,7 +321,7 @@ async def esptool_functions(port, action, log):
 		# log.push(" ")
 		log.push("\n\nbootstrap complete! \n")
 		#log.push("----------------------------")
-		print('{}: init completed'.format(port))
+		pflush('{}: init completed'.format(port))
 
 
 ###########################################
@@ -323,7 +330,7 @@ async def esptool_functions(port, action, log):
 
 @ui.page('/esptool')
 def esptool_table():
-	print('esptool_table')
+	pflush('esptool_table')
 
 	row_data = ["Loading ...","",""]
 
@@ -334,7 +341,7 @@ def esptool_table():
 	def update_rows():
 
 		last_table = row_data.copy()
-		#print(last_table)
+		#pflush(last_table)
 
 		row_data.clear()
 
@@ -357,7 +364,7 @@ def esptool_table():
 
 			port = row['port'].split("/")[-1]
 
-			print("/esptool/{}?action={}".format(port, action))
+			pflush("/esptool/{}?action={}".format(port, action))
 			
 			ui.navigate.to("/esptool/{}?action={}".format(port, action), new_tab=True)
 
@@ -391,6 +398,34 @@ def esptool_table():
    		} ).classes('h-[1500px]' )
 
 
+###########################################
+## LAUNCHPAD
+###########################################
+
+@ui.page('/launchpad/{mac_server}')
+async def launchpad(mac_server, client: Client):
+	mac_address = mac_server.split(".")[0]
+	details = mqtt_nodes[mac_server]
+
+	pflush("{}: loading launchpad".format(mac_address))
+
+	ui.page_title(mac_address)
+
+	with ui.button_group():
+		if "ipv4" in details:
+			open_config = ui.button(f"open: http://{details['ipv4']}", on_click=lambda: ui.navigate.to("http://{}".format(details['ipv4']) ) )
+		if "hostname" in details:
+			open_config = ui.button(f"open: http://{details['hostname']}", on_click=lambda: ui.navigate.to("http://{}".format(details['hostname']) ) )
+
+	log = ui.log(max_lines=50).classes('h-screen').style('white-space: pre-wrap')
+
+
+
+	keys_sorted = sorted(details.keys())
+
+	for k in keys_sorted:
+		v = details[k]
+		log.push("{}: {}".format(k,v))
 
 
 
@@ -400,7 +435,7 @@ def esptool_table():
 
 @ui.page('/esptool/{device}')
 async def esptool(device, client: Client, action: str="", chip_type: str="", mac_address: str=""):
-	print("{}: loading esptool page ({})".format(device, action))
+	pflush("{}: loading esptool page ({})".format(device, action))
 
 	ui.page_title(device)
 
@@ -420,7 +455,7 @@ async def esptool(device, client: Client, action: str="", chip_type: str="", mac
 	# reset
 
 	# if action in "reset":
-	# 	print("esptool: resetting")
+	# 	pflush("esptool: resetting")
 	# 	reset_result = reset_port(device, log)
 
 	# # chip_id
@@ -441,7 +476,7 @@ async def esptool(device, client: Client, action: str="", chip_type: str="", mac
 	# 	result = await dialog
 
 	# 	if result == "Yes":
-	# 		print("esptool: erasing flash")
+	# 		pflush("esptool: erasing flash")
 	# 		erase_result = erase_flash(device, log)
 
 	# # flash
@@ -457,7 +492,7 @@ async def esptool(device, client: Client, action: str="", chip_type: str="", mac
 	# 	result = await dialog
 
 	# 	if result == "Yes":
-	# 		print("esptool: writing flash")
+	# 		pflush("esptool: writing flash")
 	# 		write_flash_result = write_flash(device, chip_type, log)
 
 	# # bootstrap
@@ -476,12 +511,12 @@ async def esptool(device, client: Client, action: str="", chip_type: str="", mac
 	# 	result = await dialog
 
 	# 	if result == "Yes":
-	# 		print("esptool: copying bootstrap files")
+	# 		pflush("esptool: copying bootstrap files")
 	# 		bootstrap_result = copy_bootstrap_files(device, mac_address, log)
 
 
 	await client.disconnected()
-	print('{}: esptool page closed'.format(device))
+	pflush('{}: esptool page closed'.format(device))
 
 
 
@@ -495,7 +530,7 @@ async def esptool(device, client: Client, action: str="", chip_type: str="", mac
 async def sse_proxy(hostname: str, queue: asyncio.Queue):
 	# Authenticate with ESP32 (password only) and stream /tail_console into queue.
 
-	print("sse_proxy: setting up: {}".format(hostname))
+	pflush("sse_proxy: setting up: {}".format(hostname))
 
 	login_url = f"http://{hostname}/"
 	sse_url = f"http://{hostname}/tail_console"
@@ -504,67 +539,427 @@ async def sse_proxy(hostname: str, queue: asyncio.Queue):
 	
 	while True:
 		try:
-			print("sse_proxy: connecting to: {}".format(hostname))
+			pflush("sse_proxy: connecting to: {}".format(hostname))
 			await queue.put(f"[INFO] Starting proxy connection to: {hostname}")
 			
 			async with httpx.AsyncClient(timeout=timeout) as client:
 				# 1) Authenticate with password only
-				print("sse_proxy: authenticating to: {}".format(hostname))
+				pflush("sse_proxy: authenticating to: {}".format(hostname))
 				resp = await client.post(
 					login_url,
 					data={"password": device_password},
 					follow_redirects=True,
 				)
 				if resp.status_code != 200:
-					print("sse_proxy: login failed for: {}".format(hostname))
+					pflush("sse_proxy: login failed for: {}".format(hostname))
 					await queue.put(f"[ERROR] Login failed for {hostname}: {resp.text}")
 					return
 
 				# 2) Connect to SSE with session cookie
-				print("sse_proxy: starting sse stream to: {}".format(hostname))
+				pflush("sse_proxy: starting sse stream to: {}".format(hostname))
 				async with client.stream("GET", sse_url) as response:
 					if response.status_code != 200:
-						print("sse_proxy: SSE connection failed for: {}".format(hostname))
+						pflush("sse_proxy: SSE connection failed for: {}".format(hostname))
 						await queue.put(f"[ERROR] SSE connection failed: {response.status_code}")
 						return
 
-					print("sse_proxy: handling responses for: {}".format(hostname))
+					pflush("sse_proxy: handling responses for: {}".format(hostname))
 					async for raw_line in response.aiter_lines():
-						#print("raw_line: ", raw_line)
+						#pflush("raw_line: ", raw_line)
 						if raw_line.startswith("data: "):
 							msg = raw_line[6:]  # strip "data: "
 							await queue.put(msg)
 		
 		except httpx.ReadTimeout:
-			print("sse_proxy: read timeout for: {}".format(hostname))
+			pflush("sse_proxy: read timeout for: {}".format(hostname))
 			await queue.put(f"[ERROR] Read timeout")
 			await asyncio.sleep(1)
 
 		except Exception as e:
-			print("sse_proxy: exception for: {}: {}".format(hostname, e))
+			pflush("sse_proxy: exception for: {}: {}".format(hostname, e))
 			await queue.put(f"[ERROR] Lost connection to {hostname}: {e}")
 			await asyncio.sleep(1)
 
+async def generate_text(log_area):
+	for i in range(100):
+		log_area.push("This is line {}".format(i))
+		await asyncio.sleep(.5)
 
-state = SimpleNamespace( nodes={}, )
+# @ui.page('/update')
+# async def update(client: Client):
+	
+# 	# wait for client 
+# 	await ui.context.client.connected()
 
-@ui.page('/console/{action}/{hostname}')
-async def console_page(action, hostname, client: Client):
-	print("{}: console: action: {}, hostname: {}".format(local_time(), action, hostname))
+# 	# get list of selected rows
+# 	rows = app.storage.tab['selected_nodes']
+
+# 	with ui.column().classes('h-screen w-full overflow-hidden'):
+# 		# HEADER (fixed height)
+# 		ui.label(f'Updating started: {local_time()}').classes(
+# 			'p-4 bg-gray-200 w-full shrink-0 text-3xl font-bold'
+# 		)
+# 		# space for logging for each node
+# 		for row in rows:
+# 			if row['status'] != "online":
+# 				pflush("update: skipping offline node: {}".format(row['hostname']))
+# 				continue
+			
+# 			log_area = ui.log().classes(
+# 				'flex-1 w-full overflow-auto text-lg font-bold monospace'
+# 			).style('padding-bottom: 1rem;')
+
+# 			hostname = row['hostname']
+# 			mac_address = row['mac'].split(".")[0]
+# 			webconfig = row['webconfig']
+
+# 			log_area.push(f"Updating: {hostname} - {mac_address}" )
+
+# 			progress_bar = ui.linear_progress()
+
+
+# 			# instantiate netrepl
+# 			netrepl = NetRepl(hostname, nicegui_log=log_area, debug=False, verbose=False)
+
+# 			# start console thread
+# 			console_thread = threading.Thread(
+# 				target=netrepl.update, 
+# 				kwargs={'mac_address': mac_address, 'webconfig': webconfig, 'progress_bar': progress_bar} )
+			
+# 			console_thread.start()
+
+# 		# FOOTER (fixed height at bottom)
+# 		ui.label('').classes(
+# 			'p-4 bg-gray-200 w-full shrink-0'
+# 		)
+	
+# 		await client.disconnected()
+
+
+# ChatGPT generated code with collapsable debug logs and name in front of progress bar
+# @ui.page('/update')
+# async def update(client: Client):
+
+# 	# wait for client
+# 	await ui.context.client.connected()
+
+# 	rows = app.storage.tab['selected_nodes']
+
+# 	with ui.column().classes('h-screen w-full overflow-hidden'):
+# 		# HEADER
+# 		ui.label(f'Updating started: {local_time()}').classes(
+# 			'p-4 bg-gray-200 w-full shrink-0 text-3xl font-bold'
+# 		)
+
+# 		# NODE UPDATES
+# 		for row in rows:
+# 			if row['status'] != "online":
+# 				pflush(f"update: skipping offline node: {row['hostname']}")
+# 				continue
+
+# 			hostname = row['hostname']
+# 			mac_address = row['mac'].split('.')[0]
+# 			webconfig = row['webconfig']
+
+# 			# ---- container for one node ----
+# 			with ui.column().classes('w-full p-2 border-b'):
+
+# 				# header row: toggle + progress
+# 				with ui.row().classes('w-full items-center gap-4'):
+# 					toggle_btn = ui.button(
+# 						f'{hostname} log',
+# 						icon='expand_more'
+# 					).props('flat')
+
+# 					progress_bar = ui.linear_progress().classes('flex-1')
+
+# 				# log area (hidden by default)
+# 				log_area = ui.log().classes(
+# 					'w-full overflow-auto text-sm font-mono bg-black text-green-400'
+# 				).style(
+# 					'padding: 0.75rem; max-height: 300px;'
+# 				)
+# 				log_area.set_visibility(False)
+
+# 				# toggle behavior
+# 				def make_toggle(log=log_area, btn=toggle_btn):
+# 					def toggle():
+# 						log.set_visibility(not log.visible)
+# 						btn.props(
+# 							'icon=expand_less' if log.visible else 'icon=expand_more'
+# 						)
+# 					return toggle
+
+# 				toggle_btn.on('click', make_toggle())
+
+# 				# initial message
+# 				log_area.push(f'Updating: {hostname} - {mac_address}')
+
+# 				# instantiate netrepl
+# 				netrepl = NetRepl(
+# 					hostname,
+# 					nicegui_log=log_area,
+# 					debug=False,
+# 					verbose=False
+# 				)
+
+# 				# start update thread
+# 				console_thread = threading.Thread(
+# 					target=netrepl.update,
+# 					kwargs={
+# 						'mac_address': mac_address,
+# 						'webconfig': webconfig,
+# 						'progress_bar': progress_bar,
+# 					},
+# 					daemon=True,
+# 				)
+# 				console_thread.start()
+
+# 		# FOOTER
+# 		ui.label('').classes(
+# 			'p-4 bg-gray-200 w-full shrink-0'
+# 		)
+
+# 		await client.disconnected()
+
+
+
+
+
+
+async def reboot_nodes(rows):
+
+	# NODE REBOOTS
+	for each_row in rows:
+		# if each_row['status'] != "online":
+		# 	pflush(f"update: skipping offline node: {each_row['hostname']}")
+		# 	continue
+
+		hostname = each_row['hostname']
+		pflush(f"reboot_node: {hostname}")
+
+		login_url = f"http://{hostname}/"
+		reboot_url = f"http://{hostname}/reboot"
+
+		timeout = httpx.Timeout(connect=10, read=10, write=10, pool=10)
+		
+		try:
+			async with httpx.AsyncClient(timeout=timeout) as client:
+				# 1) Authenticate with password only
+				pflush("reboot_node: authenticating to: {}".format(hostname))
+				resp = await client.post(
+					login_url,
+					data={"password": device_password},
+					follow_redirects=True,
+				)
+				if resp.status_code != 200:
+					pflush("reboot_node: login failed for: {}".format(hostname))
+					ui.notify(f'{hostname} - login failed', type='negative')
+					return
+
+				# 2) Reboot node
+				pflush("reboot_node: sending reboot request to: {}".format(hostname))
+				resp = await client.get(reboot_url)
+				if resp.status_code != 200:
+					pflush("reboot_node: failed for: {}".format(hostname))
+					ui.notify(f'{hostname} - reboot request failed', type='negative')
+					return
+
+				pflush("reboot_node: rebooted: {}".format(hostname))
+				ui.notify(f'{hostname} - reboot success!', type='positive')
+		
+		except Exception as e:
+			pflush(f"reboot_node: {hostname}: exception: {e}")
+			ui.notify(f'{hostname} - Exception! - {e}', type='warning')
+			return
+
+
+
+
+
+
+
+
+
+# ChatGPT generated code (denser and alignment fixed)
+@ui.page('/update')
+async def update(client: Client):
+
+	await ui.context.client.connected()
+	rows = app.storage.tab['selected_nodes']
+
+	with ui.column().classes('h-screen w-full overflow-hidden gap-0 space-y-0'):
+		# HEADER
+		ui.label(f'Updating started: {local_time()}').classes(
+			'px-4 py-2 bg-gray-200 w-full shrink-0 text-2xl font-bold'
+		)
+
+		# NODE UPDATES
+		for row in rows:
+			# if row['status'] != "online":
+			# 	pflush(f"update: skipping offline node: {row['hostname']}")
+			# 	continue
+
+			hostname = row['hostname']
+			mac_address = row['mac'].split('.')[0]
+			webconfig = row['webconfig']
+
+			# ---- per-node container (compact) ----
+			# container that holds ALL rows
+			with ui.column().classes('w-full gap-0 space-y-0'):
+
+				# ONE NODE ROW (no column!)
+				with ui.element('div').classes('w-full q-ma-none q-pa-none'):
+
+					with ui.row().classes(
+						'w-full items-center gap-0 q-ma-none q-pa-none q-mb-none'
+					):
+						toggle_btn = ui.button(
+							hostname,
+							icon='expand_more'
+						).props(
+							'flat dense no-caps'
+						).classes(
+							'text-left leading-tight q-ma-none q-pa-none q-mb-none'
+						).style(
+							'width: 14rem; min-height: 0;'
+						)
+
+						progress_bar = ui.linear_progress().props(
+							'dense size=10px'
+						).classes(
+							'flex-1 q-ma-none q-mb-none'
+						)
+
+						status_button = ui.button(
+							"--------",
+						).props(
+							'flat dense no-caps'
+						).classes(
+							'text-left leading-tight q-ma-none q-pa-none q-mb-none'
+						).style(
+							'width: 14rem; min-height: 0;'
+						)
+
+					log_area = ui.log().classes(
+						'w-full hidden overflow-auto text-xs font-mono bg-black text-green-400 q-ma-none'
+					).style(
+						'padding: 0.25rem; max-height: 200px;'
+					)
+					log_area.set_visibility(False)
+
+				# toggle handler (closure-safe)
+				def make_toggle(log=log_area, btn=toggle_btn):
+					def toggle():
+						visible = not log.visible
+						log.set_visibility(visible)
+						btn.props(
+							'icon=expand_less' if visible else 'icon=expand_more'
+						)
+					return toggle
+
+				toggle_btn.on('click', make_toggle())
+
+				# initial log line
+				log_area.push(f'Updating: {hostname} - {mac_address}')
+
+				# start update thread
+				netrepl = NetRepl(
+					hostname,
+					nicegui_log=log_area,
+					debug=False,
+					verbose=False,
+				)
+
+				threading.Thread(
+					target=netrepl.update,
+					kwargs={
+						'mac_address': mac_address,
+						'webconfig': webconfig,
+						'progress_bar': progress_bar,
+						'status_button': status_button,
+					},
+					daemon=True,
+				).start()
+
+		# FOOTER
+		ui.label('').classes('px-4 py-2 bg-gray-200 w-full shrink-0')
+
+		await client.disconnected()
+
+
+
+
+
+
+
+
+
+@ui.page('/cmd/{hostname}')
+async def console_cmd(hostname: str, client: Client):
+
+	cmd_url = f"http://{hostname}/cmd/"
+
+	timeout = httpx.Timeout(connect=10, read=130, write=130, pool=130)
+	
+
+	async def on_send(cmd):
+		pflush("on_send: cmd: {}".format(cmd))
+		async with httpx.AsyncClient(timeout=timeout) as client:
+			r = await client.get(cmd_url + cmd)
+			pflush("on_send: response: {}".format(r.text))
+			log_area.value += r.text + "\n"
+		
+	# hostname = hostkey.split(".")[0]
+	# mac_address = hostkey.split(".")[1]
+	
+	ui.button("Send").on('click', lambda: on_send(cmd_to_send.text) )
+	ui.input(label="Repl command", on_change=lambda e: cmd_to_send.set_text(e.value)  )
+	cmd_to_send = ui.label()
+
+	with ui.column().classes('h-screen w-full overflow-hidden'):
+
+		# LOG (fills remaining space)
+		#log_area = ui.log().style('white-space: pre-wrap !important; word-break: break-word !important;' )
+
+		log_area = ui.textarea( value='').props('readonly autogrow').classes('flex-1 w-full font-mono text-lg')
+
+		# FOOTER (fixed height at bottom)
+		ui.label('').classes(
+			'p-4 bg-gray-200 w-full shrink-0'
+		)
+
+
+
+
+
+
+
+state = {"nodename": "sse_task" }
+
+@ui.page('/console/{action}/{hostkey}/{webconfig}')
+async def console_page(action, hostkey, webconfig, client: Client):
+	
+	hostname = hostkey.split(".")[0]
+	mac_address = hostkey.split(".")[1]
+	webconfig = int(webconfig)
+
+	pflush("{}: console: action: {}, hostname: {}, mac_address: {}".format(local_time(), action, hostname, mac_address))
+	pflush(f"sse_tasks: {state}")
 
 	await ui.context.client.connected()
 
 	rows = app.storage.tab['selected_nodes']
 
-	mac_address = None
-	for row in rows:
-		if 'node' in row and row['node'] == hostname:
-			mac_address = row['mac']
-			break
 
-	if not mac_address:
-		ui.notify("FATAL: no mac address for node {} in rows? Unexpected Error!".format(hostname))
-		return
+	# for row in rows:
+	# 	if 'node' in row and row['node'] == hostname:
+	# 		mac_address = row['mac']
+	# 		break
+
+	# if not mac_address:
+	# 	ui.notify("FATAL: no mac address for node {} in rows? Unexpected Error!".format(hostname))
+	# 	return
 
 	# used to signal exit from console for classic netrepl
 	user_exit = asyncio.Event()
@@ -610,9 +1005,9 @@ async def console_page(action, hostname, client: Client):
 	log_area.push("{}: [INFO] Starting: {}".format(local_time(), action))
 
 	# check for webconfig support
-	webconfig = int(mqtt_nodes[mac_address].get('webconfig', 0))
+	#webconfig = int(mqtt_nodes[mac_address].get('webconfig', 0))
 
-	if action == "update" or action == "reboot" or action == "backup":
+	if (action == "console" and webconfig == 0) or action == "update" or action == "reboot" or action == "backup":
 
 		# instantiate netrepl
 		netrepl = NetRepl(hostname, nicegui_log=log_area, user_exit=user_exit, debug=False, verbose=False)
@@ -624,22 +1019,35 @@ async def console_page(action, hostname, client: Client):
 			
 		console_thread.start()
 
-		time_out = 60
-		while time_out > 0 and console_thread.is_alive():
-			await asyncio.sleep(1)
-			time_out -= 1	
+		# time_out = 60
+		# while time_out > 0 and console_thread.is_alive():
+		# 	await asyncio.sleep(1)
+		# 	time_out -= 1
+
+		await client.disconnected()
+		user_exit.set()
+		pflush("console: Page closed for: {}".format(hostname))
 
 	# for webconfig devices only, console is done here and not in netrepl
 	if webconfig > 1:
-		print("console: webconfig console opened for: {}".format(hostname))
+		pflush("console: webconfig console opened for: {}".format(hostname))
+
+		# check for existing sse_task in state
+		if state.get(hostname):
+			pflush(f"console: existing sse_task found for: {hostname} - task: {state[hostname]}")
+			state[hostname].cancel()
+			state.pop(hostname)
 
 		# Start http console using webconfig
-		ui.navigate.to("/console_start/{}".format(hostname), new_tab=True)
+		#ui.navigate.to("/console_start/{}".format(hostname), new_tab=True)
 
 		q = asyncio.Queue()
 
 		sse_task = asyncio.create_task(sse_proxy(hostname, q))
-		print("console: sse_task started for: {}".format(hostname))
+		pflush(f"console: sse_task started for: {hostname} - adding to state as task: {sse_task}")
+
+		# add sse_task to state
+		state[hostname] = sse_task
 
 		async def reader():
 			while True:
@@ -650,15 +1058,29 @@ async def console_page(action, hostname, client: Client):
 				log_area.push(line)
 
 		reader_task = asyncio.create_task(reader())
-		print("console: reader_task started for: {}".format(hostname))
+		pflush(f"console: reader_task started for: {hostname} as task: {reader_task}")
 
 		await client.disconnected()
 		
-		print("console: client disconnected, cleaning up for: {}".format(hostname))
+		pflush("console: client disconnected, cleaning up tasks for: {}".format(hostname))
+
 		sse_task.cancel()
+		await asyncio.sleep(3)
+		if sse_task.cancelled():
+			pflush(f"console: sse_task confirmed cancelled for: {hostname} - removing task: {sse_task} from state")
+			state.pop(hostname)
+		else:
+			pflush(f"console: sse_task not cancelled for: {hostname} - task: {sse_task}")
+
 		reader_task.cancel()
 
-	print("console: Page closed for: {}".format(hostname))
+		await asyncio.sleep(3)
+		if reader_task.cancelled():
+			pflush(f"console: reader_task confirmed cancelled for: {hostname} - removing task: {reader_task} from state")
+		else:
+			pflush(f"console: reader_task not cancelled for: {hostname} - task: {reader_task}")
+
+	pflush("console: Page closed for: {}".format(hostname))
 
 # ####################################################
 # # Connect to esp32 and start console window page
@@ -717,9 +1139,23 @@ async def console_page(action, hostname, client: Client):
 
 @ui.page('/')
 def mqtt_nodelist():
-	print('home page opened - mqtt_nodelist')
+	pflush('home page opened - mqtt_nodelist')
 
-	ui.add_head_html('<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">')
+	#ui.add_head_html('<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">')
+
+	ui.add_head_html('''
+	<style>
+	@keyframes blink {
+	0%   { opacity: 1; }
+	50%  { opacity: 0; }
+	100% { opacity: 1; }
+	}
+	.status-blink {
+	animation: blink 500ms infinite;
+	}
+	</style>
+	''')
+
 
 	ui.add_body_html(style_sheet)
 	# dark = ui.dark_mode()
@@ -727,16 +1163,40 @@ def mqtt_nodelist():
 
 	# Called every 3 seconds to check for changes to the table data
 	@ui.refreshable
-	def update_rows():
+	def update_rows(update_grid=True):
 
 		last_table = row_data.copy()
-		#print(last_table)
+		#pflush(last_table)
 
 		row_data.clear()
 
+		name2mac_index = {}
+		sorted_node_names = []
+
 		for mac, node in mqtt_nodes.items():
-			#print("node: {}".format(node))
-			hostname = node.get('hostname', "cubeclock")
+			#pflush(f"mac: {mac}, node: {node}")
+
+			if 'hostname' not in node:
+				pflush(f"!!!!!!! hostname not in node: {node} mac {mac}")
+				continue
+
+			unique_name = node['hostname'] + "." + mac
+			#pflush(f"unique_name: {unique_name}")
+			if unique_name in sorted_node_names: 
+				continue
+
+			sorted_node_names.append(unique_name)
+			name2mac_index[unique_name] = mac
+
+		sorted_node_names.sort()
+
+		#for mac, node in mqtt_nodes.items():
+		for node_name in sorted_node_names:
+			mac = name2mac_index[node_name]
+			node = mqtt_nodes[mac]
+			#pflush("node: {}".format(node))
+			# hostname = node.get('hostname', "cubeclock")
+			hostname = node.get('hostname', "")
 			build = node.get('platform', "")
 			chip = "unknown"
 			platform = ""
@@ -753,7 +1213,7 @@ def mqtt_nodelist():
 					platform = "32"
 
 			# total_mem = node.get('memory', 0)
-			#print(f"{hostname}: {node} {total_mem} {chip} {build} {platform}")
+			#pflush(f"{hostname}: {node} {total_mem} {chip} {build} {platform}")
 			# if total_mem:
 
 			# 	if total_mem > 1000000:
@@ -763,19 +1223,26 @@ def mqtt_nodelist():
 
 			last_restart = node.get('last_restart', "")
 
+			uptime = "?"
+			
 			if last_restart:
 
-				input_format = "%Y/%m/%d-T%H:%M:%S"
-				target_datetime = datetime.strptime(last_restart, input_format)
+				# only calculate days passed if it is a valid date
+				# otherwise, a reboot just happened
+				if '1999' in last_restart:
+					uptime = "?"
+				else:
+					input_format = "%Y/%m/%d-T%H:%M:%S"
+					target_datetime = datetime.strptime(last_restart, input_format)
 
-				now = datetime.now()
-				delta = now - target_datetime
-				days_passed = delta.days
-				hours_passed = delta.seconds // 3600
+					now = datetime.now()
+					delta = now - target_datetime
+					days_passed = delta.days
+					hours_passed = delta.seconds // 3600
 
-				time_str = target_datetime.strftime("%H:%M")
+					time_str = target_datetime.strftime("%H:%M")
 
-				uptime = "{}d".format(days_passed)
+					uptime = "{}d".format(days_passed)
 
 			mpy = node.get('mpy', "?.??.0")[0:4]
 
@@ -792,9 +1259,13 @@ def mqtt_nodelist():
 			
 			status = node.get('status', "unknown")
 
-			row_data.append( {"node": hostname, 
+			webconfig = node.get('webconfig', "")
+
+			row_data.append( {"node": node_name,
+					"hostname": hostname, 
 					"mac": mac, 
 					"status": status,
+					"webconfig": webconfig,
 					"server": server,
 					"mpy": mpy,
 					"signal": signal,
@@ -803,24 +1274,28 @@ def mqtt_nodelist():
 					"platform": platform
 					} )
 
-		#print(row_data)
+		#pflush(row_data)
 		
 		# for device in pathlib.Path('/dev').glob('tty[UA][SC][BM]*'):
 		# 	timestamp = datetime.datetime.fromtimestamp(device.stat()[7])
 		# 	row_data.append( {"node": "/dev/" + device.name , "mac": timestamp.strftime("%m/%d %H:%M:%S"), "status": "", "server": "" } )
 
-		if last_table != row_data:
-			grid.update()
-			grid.run_grid_method('autoSizeAllColumns')
+		if update_grid and last_table != row_data:
+			#pflush(f"updating grid - {row_data} ")
+			#grid.update()
+			ui.navigate.to("/")
+			#grid.run_grid_method('autoSizeAllColumns')
 
 	async def esptool_handler(button: ui.button):
-		print("esptool_handler")
+		pflush("esptool_handler")
 
 		ui.navigate.to("/esptool", new_tab=True)
 
 	# Called when a console related action button is clicked
 	# reboot, update, console, mqttserver
-	async def console(button: ui.button):
+	async def main_button_handler(button: ui.button):
+		pflush(f"main page button clicked: {button.text}")
+		
 		action = button.text
 		
 		await ui.context.client.connected()
@@ -830,60 +1305,72 @@ def mqtt_nodelist():
 		if not rows:
 			return
 		
-		print(rows)
+		pflush(rows)
 		
-		app.storage.tab['selected_nodes'] = rows
-		print(app.storage.tab)
+		app.storage.tab.update({'selected_nodes': rows})
+		pflush(app.storage.tab)
+	
+		if action == "update":
+			ui.navigate.to("/update", new_tab=True)
+			return
 
-		# if action in "backup|update|reboot|console":
-		# 	ui.navigate.to("/console/{}".format(action), new_tab=True)
-		# 	return
-
+		if action == "reboot":
+			await reboot_nodes(rows)
+			return
+		
 		for row in rows:
+			hostname = row['node']
+			mac_address = hostname.split(".")[1]
+			webconfig = str(row['webconfig'])
+			if not webconfig:
+				webconfig = "0"
 			
-			if row['status'] == "online":
-				if action == "update" or action == "reboot" or action == "backup" or action == "console":
-					hostname = row['node']
-					ui.navigate.to("/console/{}/{}".format(action, hostname), new_tab=True)
+			# if row['status'] == "online":
+			if action == "update" or action == "reboot" or action == "backup" or action == "console":
+				ui.navigate.to("/console/{}/{}/{}".format(action, hostname, webconfig), new_tab=True)
+				pflush(f"Returned from navigate.to for: {hostname}")
 
-			if action == "shutdown" and row['status'] == "offline":
-				hostname = row['node']
-				mac_address = row['mac']
-				shutdown_node(mac_address)
-				ui.notify("shutdown: {} ({})".format(hostname, mac_address))
+			if action == "shutdown":
+
+				shutdown_node(hostname)
+				ui.notify("shutdown: {} ".format(hostname) )
 
 			# remove mqtt config and sensor
 			# homeassistant/sensor/esp/ecfabc281b13/config
 				
-			if action == "remove" and row['status'] != "online":
-				hostname = row['node']
-				mac_address = row['mac']
-				remove_node(mac_address)				
-				ui.notify("removed: {} ({})".format(hostname, mac_address))
+			# hostname is hostname.mac_addr.server_name
+			if action == "remove":
+				remove_node(hostname)				
+				ui.notify("removed: {}".format(hostname) )
 
-	async def output_selected_rows():
-		rows = await grid.get_selected_rows()
-		if rows:
-			for row in rows:
-				ui.notify(row)
-		else:
-			ui.notify('No rows selected.')
+	# async def output_selected_rows():
+	# 	rows = await grid.get_selected_rows()
+	# 	if rows:
+	# 		for row in rows:
+	# 			detail = mqtt_nodes[row['mac']]
+	# 			ui.notify(detail)
+	# 	else:
+	# 		ui.notify('No rows selected.')
 
+
+	# refresh mqtt node list completely
 	async def output_selected_row():
-		row = await grid.get_selected_row()
-		if row:
-			ui.notify(row)
-		else:
-			ui.notify('No row selected!')
+		global mqtt_nodes
+		mqtt_nodes.clear()
+		resubscribe_all()
+
+
+	def reload_nodes():
+		exit(1)
 
 	with ui.button_group():
 		#ui.link('console', "/console", new_tab=True)
-		ui.button('console', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
-		ui.button('update', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
-		ui.button('reboot', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
-		ui.button('backup', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
-		ui.button('shutdown', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
-		ui.button('remove', on_click=lambda e: console(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('console', on_click=lambda e: main_button_handler(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('update', on_click=lambda e: main_button_handler(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('reboot', on_click=lambda e: main_button_handler(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('backup', on_click=lambda e: main_button_handler(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('shutdown', on_click=lambda e: main_button_handler(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
+		ui.button('remove', on_click=lambda e: main_button_handler(e.sender)).style('font-size: 10px; width: 60px; height: 10px;')
 		ui.button('esptool', on_click=lambda e: esptool_handler(e.sender) ).style('font-size: 10px; width: 60px; height: 10px;')
 		ui.button('resize', on_click=lambda e: grid.run_grid_method('autoSizeAllColumns') ).style('font-size: 10px; width: 60px; height: 10px;')
 
@@ -903,53 +1390,81 @@ def mqtt_nodelist():
 	# column_defs = [
 	# 	{'headerName': 'Status', 'field': 'status', 'cellRenderer': icon_renderer},
 	# 	{'headerName': 'Name', 'field': 'name'},
-	# ]
+	# ] 
+
+	# 'hide': False, 'hide': True 
+	# useful icons: ⚠️✅ ❌ ⚠️ ℹ️ ⛔ 🔴 🟢 🟡 🔵 ☑️ ⬜ ⬛ ✔ ✖ ❗ ❓⏰️
 
 	column_data = [
-			{'headerName': 'Node', 'field': 'node', 'width': 50, 'checkboxSelection': True},
-			{'headerName': 'St', 'field': 'status', ':valueFormatter': '(params) => params.value === "online" ? "✅" : (params.value === "shutdown" ? "💤" : "❌")', 'width': 5,
-				# 'cellClassRules': {
-				# 'bg-red-300': 'x == "offline"',
-				# 'bg-blue-300': 'x == "shutdown"',
-				# 'bg-green-300': 'x == "online"'} 
-				},
-			{'headerName': 'up', 'field': 'uptime', 'width': 4},
-			{'headerName': 'db', 'field': 'signal', 'width': 4},
-			{'headerName': 'RBs', 'field': 'reboots', 'width': 4},
-			#{'headerName': 'platform', 'field': 'platform', 'width': 15},
-			#{'headerName': 'Mac', 'field': 'mac', 'width': 15},
-			{'headerName': 'Server', 'field': 'server', 'width': 35},
-			#{'headerName': 'mpy', 'field': 'mpy', 'width': 8},
-		]
+		{'headerName': 'Hostname', 'field': 'hostname',
+		'checkboxSelection': True, 'headerCheckboxSelection': True, 'width': 270},
+
+		{'headerName': 'Node', 'field': 'node', 'width': 95, 'hide': True},
+
+		{
+			'headerName': 'St',
+			'field': 'status',
+			'width': 80,
+
+			':valueFormatter': '''
+				(params) =>
+					params.value === "online"    ? "✅" :
+					params.value === "wdt"       ? "⏰️" :
+					params.value === "shutdown"  ? "💤" :
+					params.value === "degraded"  ? "⚠️" :
+					params.value === "offline"   ? "❌" :
+					params.value === "critical"  ? "⛔" :
+					"❓"
+			''',
+
+			'cellClassRules': {
+				'status-blink': 'x === "degraded" || x === "offline" || x === "critical"'
+			}
+		},
+
+
+		{'headerName': 'WC', 'field': 'webconfig', 'width': 95},
+		{'headerName': 'up', 'field': 'uptime', 'width': 140},
+		{'headerName': 'db', 'field': 'signal', 'width': 100},
+		{'headerName': 'RB', 'field': 'reboots', 'width': 95},
+		{'headerName': 'Server', 'field': 'server'} ]
 	
+	update_rows(update_grid=False)
+
 	grid = ui.aggrid( {'columnDefs': column_data,
-		'autoSizeStrategy': 'fitCellContents',
+		#'autoSizeStrategy': 'fitCellContents',
 		'rowData': row_data,
 		'rowSelection': 'multiple',
-		'rowHeight': 20,
+		'rowHeight': 22,
 	} ).classes('h-[1500px]' )
-
-	#print(grid.options)
-
 
 	ui.button('refresh', on_click=output_selected_row)
 
 	def handle_cell_click(event):
-		# Access event details like column and row data
+		# event.args['data'] has the row data (even if sorted in the gui)
+		# row_index is the row selected based on the gui order and may not match the grid.options['rowData']
+		# so use the event.args data for handling this
+		#pflush(event.args)
 		col = event.args['colId']
-		row_index = event.args['rowIndex']
-		row_data = grid.options['rowData'][row_index]
-		
-		ui.notify(f'Clicked column "{col}" in row {row_index} with data: {row_data}')
+		#row_index = event.args['rowIndex']
+		#pflush(f"col: {col}, row: {row_index}")
+		#row_data = grid.options['rowData'][row_index]
+		#pflush(f'row_data: {row_data}')
+		row_data = event.args['data']
+		#detail = mqtt_nodes[row_data['mac']]
+		mac_address = row_data['mac']
+		ui.navigate.to(f"/launchpad/{mac_address}", new_tab=True)
+
+		#ui.notify(detail)
 
 	grid.on('cellClicked', handle_cell_click)
 
 
 @ui.page('/test')
 async def test(client: Client):
-	print('preparing')
+	pflush('preparing')
 	await client.connected()
-	print('connected')
+	pflush('connected')
 	#ui.context.client.page_container.default_slot.children[0].props(':style-fn="o => ({ height: `calc(100vh - ${o}px)` })"')
 	#ui.context.client.content.classes('h-full')
 	#log = ui.log(max_lines=500).classes('text-lg').classes('monospace')
@@ -970,13 +1485,13 @@ async def test(client: Client):
 	# result = await dialog
 	# log.push(f'You chose {result}')
 
-	#print("tabs: {}\n".format(app.storage.tab))
-	#print("client: {}\n".format(app.storage.client))
-	#print("user: {}\n".format(app.storage.user))
-	#print("general: {}\n".format(app.storage.general))
-	#print("browser: {}\n".format(app.storage.browser))
+	#pflush("tabs: {}\n".format(app.storage.tab))
+	#pflush("client: {}\n".format(app.storage.client))
+	#pflush("user: {}\n".format(app.storage.user))
+	#pflush("general: {}\n".format(app.storage.general))
+	#pflush("browser: {}\n".format(app.storage.browser))
 	await client.disconnected()
-	print('disconnected')
+	pflush('disconnected')
 
 
 """

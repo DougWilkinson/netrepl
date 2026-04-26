@@ -13,6 +13,7 @@ import logging
 import threading
 import pathlib
 import requests
+import shutil
 
 #load other modules
 from file import File
@@ -133,6 +134,10 @@ skip = ("#",
 
 class NetRepl:
 	def __init__(self, hostname, nicegui_log=None, user_exit=None, password=None, debug=False, verbose=False) -> None:
+		
+		if nicegui_log:
+			nicegui_log.push(f"Instantiating netrepl for {hostname}")
+
 		self.hostname = hostname
 
 		if user_exit is None:
@@ -224,18 +229,23 @@ class NetRepl:
 		if not self.user_exit.is_set() and self.nicegui_log:
 			self.nicegui_log.push(message)
 		self.logger.info("{}: {}".format(self.hostname, message))
+		print("{}:{}".format(self.hostname, message) )
 		#self.weblog.flush()
 		self.logconsole.flush()
 
 	def connect(self, timeout=30) -> bool:
 		if self.connected:
 			return True
+
+		# Try host name first, then try MAC address
+		connect_name = self.hostname
+
 		#print("after 1st Webrepl(), before session while loop")
 		for attempt in range(5):
 			try:
 				start_time = time()
 				print("connecting (timeout={}), try={}".format(timeout, attempt))
-				self.session = Webrepl(**{'host':self.hostname, 
+				self.session = Webrepl(**{'host': connect_name, 
 						'password': self.password,
 						'timeout':timeout,
 						'debug': self.debug,
@@ -252,9 +262,12 @@ class NetRepl:
 					self.logprint("host {} not found".format(self.hostname) )
 					return False
 			except OSError as e:
-				if e.errno == 113:
-					self.logprint("No route to {} found".format(self.hostname) )
+				if e.errno == 113 and connect_name == self.remote_mac:
+					self.logprint("No route to MAC address {} found either, stopping".format(self.hostname) )
 					return False
+				self.logprint(f'Attempting to connect using MAC address {self.remote_mac}')
+				connect_name = self.remote_mac
+
 			except Exception as e:
 				self.logprint("connect timed out, retry in 10 seconds" )
 				self.logprint(e)
@@ -432,8 +445,9 @@ class NetRepl:
 				#print("confirm_files: mpy-cross OK for: {}".format(source_name) )
 
 			else:
-
-				if not self.local_stat(File(str(source_path) ) ):
+				try:
+					shutil.copy(source_path, self.ams_path / "build")
+				except FileNotFoundError:
 					self.logprint("confirm_files: source file {} from {} not found".format(source_name, source_files[source_name]) )
 					return False
 			
@@ -448,15 +462,15 @@ class NetRepl:
 		name_no_ext = source_path.stem
 		source_name = source_path.name
 
-		print("put_file: {}".format(name_no_ext) )
+		#print("put_file: {}".format(name_no_ext) )
 
 		if ".py" in source_name and use_mpy:
 			# generate .mpy and make this the source file
 			#print("using .mpy for {}".format(source_name))
 			path_to_mpy = self.make_mpy(source_path)
-			print("put_file: path to mpy: {}".format(path_to_mpy) )
+			#print("put_file: path to mpy: {}".format(path_to_mpy) )
 			source_file = File(str(path_to_mpy) )
-			print("put_file: source_file.path: {}".format(source_file.path) )
+			#print("put_file: source_file.path: {}".format(source_file.path) )
 			dest_file = File(name_no_ext + ".mpy")
 		else:
 			# Use original file name as source
@@ -491,8 +505,8 @@ class NetRepl:
 			else:
 				self.session.put_file(source_file.path, dest_file.path )
 				new_hash = self.remote_hash(dest_file.path)
-				print("new hash: ", new_hash)
-				print("source_file hash: ", source_file.hash)
+				# print("new hash: ", new_hash)
+				# print("source_file hash: ", source_file.hash)
 				if new_hash != source_file.hash:
 					# print("local: ", remote_file.path, remote_file.size)
 					# Stop here if copy fails
@@ -649,7 +663,7 @@ class NetRepl:
 		error_hashfile = File("error_hashfile", exists=False)
 		#print("remote_hash({})".format(filename) )
 		hash = self.send_command('genhash("{}")'.format(filename) )
-		print("hash: ", hash)
+		#print("hash: ", hash)
 		if hash and b'ENOENT' in hash:
 			return "FileNotFoundError"
 		
@@ -677,11 +691,16 @@ class NetRepl:
 		else:
 			return ""
 
-	def load_config(self, instance="run"):
-		file_path = pathlib.Path(self.ams_path / self.remote_mac)
+	def load_config(self, mac_address, instance="run"):
+
+		macfile = self.ams_path / "hosts/{}".format(mac_address)
+		if not os.path.exists( macfile ): 
+			self.logprint("update: FATAL - no MAC file - stopping")
+			return ""
+
 		try:
 			full = {}
-			with open(file_path) as file:
+			with open(macfile) as file:
 				raw = file.readline()
 				while raw:
 					kv = json.loads(raw)
@@ -691,8 +710,8 @@ class NetRepl:
 					raw = file.readline()
 			return full
 		except:
-			print("load_file: {} failed.".format(file_path) )
-			return {}
+			print("load_file: {} failed.".format(macfile) )
+			return ""
 
 	def setup(self) -> bool:
 		print("setup: Connecting to: {}".format(self.hostname) )
@@ -786,7 +805,9 @@ class NetRepl:
 
 							# Handle #fakeimport
 							if "#fakeimport" in line and len(items) > 1:
-								stack.append(items[1] + ".py")
+								fake = items[1]
+								print("fakeimport: {}".format(fake))
+								stack.append(fake)
 								continue
 
 							# Ignore imports of the same file
@@ -891,32 +912,32 @@ class NetRepl:
 
 		return True
 
-	def update(self, mac_address=None, webconfig=False):
+	def update(self, mac_address=None, webconfig=False, progress_bar=None, status_button=None):
 		self.logprint("update: checking source files")
 
 		if mac_address:
 			self.remote_mac = mac_address
 
-			if not os.stat( self.ams_path / mac_address ):
-				self.logprint("update: FATAL - no MAC file - stopping")
-				return False
-
-			macfile_hostname = self.load_config()
+			macfile_hostname = self.load_config(mac_address)
 
 			if not macfile_hostname:
 				self.logprint("update: FATAL - expected MAC file - stopping")
 				return False
+
+			self.hostname = macfile_hostname
+
 		else:
 			macfile_hostname = self.hostname
 			
 		hostname_path = self.ams_path / ( "hosts/{}.py".format(macfile_hostname) )
 
 		try:
-			self.logprint(hostname_path)
+			self.logprint(f"update: using file: {hostname_path}")
 			r = os.stat( hostname_path )
 				
 		except FileNotFoundError:
 			self.logprint("update: FATAL - no hostname file found - stopping")
+			status_button.set_text("Failed - no hostname")
 			return False
 
 		args = ["boot.py", "main.py", self.hostname + ".py"]
@@ -926,10 +947,10 @@ class NetRepl:
 			self.logprint("update: FAIL - check for missing files or mpy compiler issues - stopping")
 			return False
 
-		if webconfig > 1:
+		if webconfig > 2:
 
 			self.logprint("update: starting http-based update")
-
+			status_button.set_text("Starting")
 			# setup websocket to connect to sha256
 			# Device and file info
 			login_url = "http://{}/".format(self.hostname)
@@ -948,16 +969,22 @@ class NetRepl:
 
 			all_success = True
 			remove_py_files = []
+			reboot_needed = False
+			files_processed = 0
 
 			# get_files returns a dictionary of filenames without paths
 			for local_file_name in imported_files:
+				
+				# update progress bar
+				progress_bar.set_value( round(files_processed/len(imported_files), 2) )
+				files_processed += 1
 
 				if ".py" in local_file_name and local_file_name not in MPY_EXLCUDES:
 					stripped_name = local_file_name.split(".")[0]
 					remove_py_files.append(local_file_name)
 					local_file_name = stripped_name + ".mpy"
 
-				with open(self.ams_path / local_file_name, "rb") as f:
+				with open(self.ams_path / "build/{}".format(local_file_name), "rb") as f:
 					data = f.read()
 
 				sha256 = hashlib.sha256(data).hexdigest()
@@ -967,6 +994,7 @@ class NetRepl:
 
 				if resp.status_code == 200 and resp.text == sha256:
 					self.logprint("Skipped: {}".format(local_file_name))
+					status_button.set_text(f"skipped: {local_file_name}")
 					continue
 				
 				# self.logprint("{}: would have been updated".format(local_file_name))
@@ -977,33 +1005,49 @@ class NetRepl:
 
 				if resp.status_code == 200 and resp.text == sha256:
 					self.logprint("Copied : {}: Updated".format(local_file_name))
+					status_button.set_text(f"copied: {local_file_name}")
+					reboot_needed = True
 				else:
 					self.logprint("Failed : {}".format(local_file_name))
+					status_button.set_text(f"failed: {local_file_name}")
+					
 					if ".mpy" in local_file_name:
 						# Don't remove .py if .mpy didn't get updated with success
 						remove_py_files.pop()
 
 					all_success = False
 
+			progress_bar.set_value( 1.0 )
+
 			if not all_success:
 				self.logprint("Update failed for some files, stopping")
 				return False
-			
-			self.logprint("Update confirmed, cleaning up old files")
 
-			for file in remove_py_files:
-				resp = session.get("http://{}/remove/{}.py".format(self.hostname, file) )
+			if not reboot_needed:
+				self.logprint("update: No files updated - skipping reboot")
+				status_button.set_text("Done - no reboot")
+				return True
 
-				if resp.status_code != 404:
-					self.logprint("Remove failed for: {}".format(file))
-					
+			# Cleanup_files code added			
+			self.logprint("update: completed: cleaning up any .py files")
+
+			url_cleanup = f"http://{self.hostname}/cleanup_files"
+			response = session.post(url_cleanup, json={"imported_files": list(imported_files.keys() ) }, headers={"Content-Type": "application/json"})
+
+			self.logprint(response.text)
+
+			self.logprint("update: sending reboot request")
+
 			resp = session.get("http://{}/reboot".format(self.hostname) )
 
 			if resp.status_code != 200:
-				self.logprint("Reboot failed, stopping")
+				self.logprint("update: reboot failed, stopping")
+				status_button.set_text("reboot failed")
 				return False
 			
-			sleep(5)
+			sleep(1)
+			self.logprint("update: reboot success!")
+			status_button.set_text("reboot success")
 			return True
 
 
